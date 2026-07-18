@@ -1,0 +1,11 @@
+{
+  "name": "quecksilver-cli",
+  "version": "1.0.0",
+  "bin": {
+    "quecksilver": "./bin/cli.js"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  }
+}
