@@ -19,6 +19,7 @@ export const colors = {
   cyan: `${ESC}36m`,
   magenta: `${ESC}35m`,
   white: `${ESC}97m`,
+  blue: `${ESC}34m`,
   // QueckSilver brand steel-blue, pulled directly from --primary in
   // src/index.css (dark theme, default accent): hsl(195 45% 55%) → rgb(89,166,192).
   steelBlue: `${ESC}38;2;89;166;192m`,
@@ -158,9 +159,17 @@ export function openPath(target) {
 // buffer on each keystroke. Best-effort: no-op if stdout isn't a real TTY,
 // and any failure (e.g. a future Node readline internals change) is swallowed
 // rather than crashing the chat.
-export function enableSlashCommandHighlight(rl, promptColored) {
+export function enableSlashCommandHighlight(rl, promptColored, knownCommands) {
   if (!process.stdout.isTTY) return;
   const promptVisibleLen = visibleLength(promptColored);
+  const known = new Set(knownCommands.map((k) => k.toLowerCase()));
+
+  // Only the command WORD needs to exactly match a known command — "/imag"
+  // stays plain, "/image" (with or without a trailing prompt yet) lights up.
+  const isRecognizedCommand = (line) => {
+    const match = line.match(/^\/(\S*)/);
+    return !!match && known.has(match[1].toLowerCase());
+  };
 
   process.stdin.on('keypress', (_char, key) => {
     if (key && (key.name === 'return' || key.name === 'enter')) return;
@@ -168,7 +177,7 @@ export function enableSlashCommandHighlight(rl, promptColored) {
       try {
         if (rl.closed) return;
         const line = rl.line ?? '';
-        const text = line.startsWith('/') ? c(line, 'steelBlue') : line;
+        const text = isRecognizedCommand(line) ? c(line, 'blue') : line;
         readline.cursorTo(process.stdout, 0);
         readline.clearLine(process.stdout, 0);
         process.stdout.write(promptColored + text);

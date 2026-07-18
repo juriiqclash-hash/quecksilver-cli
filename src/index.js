@@ -18,6 +18,14 @@ const ENDPOINT = `${SUPABASE_URL}/functions/v1/cli-chat`;
 const VERSION = pkg.version;
 const BANNER_WIDTH = 46;
 
+// Every slash command recognized inside interactiveChat's rl.on('line', ...)
+// handler below — kept in one place so the live input-highlighting knows
+// exactly the same set of "valid" commands the handler itself checks for.
+const KNOWN_SLASH_COMMANDS = [
+  'file', 'attach', 'output', 'open', 'continue', 'config', 'usage',
+  'commands', 'help', 'search', 'image', 'doc', 'music',
+];
+
 // Keep in sync with the server-side cap in supabase/functions/cli-chat/index.ts.
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
 const MIME_BY_EXT = {
@@ -277,16 +285,16 @@ const COMMAND_SECTIONS = [
   },
 ];
 
-// Command tokens print in steelBlue, descriptions in gray — same visual
-// split as the live /-highlighting while typing, so the reference list and
-// the live input use the same "this is a command" color language.
+// Command tokens print in blue, descriptions in gray — same visual split as
+// the live /-highlighting while typing, so the reference list and the live
+// input use the same "this is a command" color language.
 export function printCommandList() {
   const colWidth = Math.max(...COMMAND_SECTIONS.flatMap((s) => s.rows.map(([cmd]) => cmd.length))) + 2;
   COMMAND_SECTIONS.forEach((section, i) => {
     if (i > 0) console.log();
     console.log(c(section.heading, 'gray'));
     section.rows.forEach(([cmd, desc]) => {
-      console.log(`  ${c(cmd.padEnd(colWidth), 'steelBlue')}${c(desc, 'gray')}`);
+      console.log(`  ${c(cmd.padEnd(colWidth), 'blue')}${c(desc, 'gray')}`);
     });
   });
 }
@@ -548,7 +556,7 @@ async function interactiveChat(token, { files = [], open, initialHistory = [] } 
     output: process.stdout,
     prompt: promptText,
   });
-  enableSlashCommandHighlight(rl, promptText);
+  enableSlashCommandHighlight(rl, promptText, KNOWN_SLASH_COMMANDS);
   const history = [...initialHistory];
   if (initialHistory.length > 0) {
     console.log(c(`Resumed previous session (${initialHistory.length / 2} turn(s)).`, 'gray'));
