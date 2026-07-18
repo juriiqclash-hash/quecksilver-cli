@@ -39,8 +39,8 @@ export function runLoginFlow() {
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.end(
         token
-          ? '<html><body style="font-family: sans-serif; padding: 40px;">Login successful! You can close this window and return to the terminal.</body></html>'
-          : '<html><body style="font-family: sans-serif; padding: 40px;">Login failed: no token received.</body></html>'
+          ? '<html><body style="font-family: sans-serif; padding: 40px; background: #ffffff;">Login successful! You can close this window and return to the terminal.</body></html>'
+          : '<html><body style="font-family: sans-serif; padding: 40px; background: #ffffff;">Login failed: no token received.</body></html>'
       );
 
       // Wait for the response to actually be flushed before closing the
