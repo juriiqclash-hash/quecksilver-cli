@@ -7,7 +7,7 @@ import {
   getToken, getAllSettings, getSetting, setSetting, saveLastSession, loadLastSession,
 } from './config.js';
 import { runLoginFlow } from './auth.js';
-import { c, box, mascot, centerBlock, startThinkingSpinner, openPath } from './ui.js';
+import { c, box, mascot, centerBlock, startThinkingSpinner, openPath, enableSlashCommandHighlight } from './ui.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'));
@@ -121,7 +121,7 @@ async function printUsage(token) {
   } catch {
     // Best-effort — usage info just won't show if this fails.
   }
-  console.log(c('CLI rate limits: 30 chat requests / 15 min, 10 generations (image/document/music) / 15 min.', 'gray'));
+  console.log(c('CLI rate limits: 10 chat requests / min, 20 generations (image/document/music) / 15 min.', 'gray'));
 }
 
 // Simple numeric-segment comparison — good enough for x.y.z versions,
@@ -240,34 +240,55 @@ function printSavedPaths(paths) {
 
 // Full command reference — shown on demand via /commands (in-chat) or
 // `quecksilver --commands` (from the shell), not dumped on every startup.
+const COMMAND_SECTIONS = [
+  {
+    heading: 'Start-up flags (quecksilver --flag ...):',
+    rows: [
+      ['--search "query"', 'Force a web search'],
+      ['--image "prompt"', 'Generate or edit an image (with -f attached)'],
+      ['--doc <type> "topic"', 'Generate a document (docx/xlsx/pptx/pdf/markdown/csv)'],
+      ['--music "prompt"', 'Generate a short music track'],
+      ['-f, --file <path>', 'Attach a local file (repeatable)'],
+      ['-o, --output <path>', 'Also save the reply to a file'],
+      ['--open', 'Auto-open generated files'],
+      ['-c, --continue', 'Resume the last local session'],
+      ['--json', 'Machine-readable output for scripting'],
+    ],
+  },
+  {
+    heading: 'Subcommands:',
+    rows: [
+      ['login / logout', 'Sign in / out'],
+      ['config / config set k v', 'Show or change settings'],
+      ['usage', 'Show plan and rate limits'],
+      ['--version, -v', 'Show the installed CLI version'],
+    ],
+  },
+  {
+    heading: 'Slash commands (while chatting):',
+    rows: [
+      ['/search, /image, /doc <type> <topic>, /music', 'Force a tool'],
+      ['/file <path>', 'Attach a file to your next message'],
+      ['/output <path>', 'Save your next reply to a file'],
+      ['/open', 'Toggle auto-open for this session'],
+      ['/continue', 'Merge the last session into this one'],
+      ['/config, /usage', 'Same as the subcommands above'],
+    ],
+  },
+];
+
+// Command tokens print in steelBlue, descriptions in gray — same visual
+// split as the live /-highlighting while typing, so the reference list and
+// the live input use the same "this is a command" color language.
 export function printCommandList() {
-  const lines = [
-    'Start-up flags (quecksilver --flag ...):',
-    '  --search "query"          Force a web search',
-    '  --image "prompt"          Generate or edit an image (with -f attached)',
-    '  --doc <type> "topic"      Generate a document (docx/xlsx/pptx/pdf/markdown/csv)',
-    '  --music "prompt"          Generate a short music track',
-    '  -f, --file <path>         Attach a local file (repeatable)',
-    '  -o, --output <path>       Also save the reply to a file',
-    '  --open                    Auto-open generated files',
-    '  -c, --continue            Resume the last local session',
-    '  --json                    Machine-readable output for scripting',
-    '',
-    'Subcommands:',
-    '  login / logout            Sign in / out',
-    '  config / config set k v   Show or change settings',
-    '  usage                     Show plan and rate limits',
-    '  --version, -v             Show the installed CLI version',
-    '',
-    'Slash commands (while chatting):',
-    '  /search, /image, /doc <type> <topic>, /music   Force a tool',
-    '  /file <path>              Attach a file to your next message',
-    '  /output <path>            Save your next reply to a file',
-    '  /open                     Toggle auto-open for this session',
-    '  /continue                 Merge the last session into this one',
-    '  /config, /usage           Same as the subcommands above',
-  ];
-  lines.forEach((l) => console.log(c(l, 'gray')));
+  const colWidth = Math.max(...COMMAND_SECTIONS.flatMap((s) => s.rows.map(([cmd]) => cmd.length))) + 2;
+  COMMAND_SECTIONS.forEach((section, i) => {
+    if (i > 0) console.log();
+    console.log(c(section.heading, 'gray'));
+    section.rows.forEach(([cmd, desc]) => {
+      console.log(`  ${c(cmd.padEnd(colWidth), 'steelBlue')}${c(desc, 'gray')}`);
+    });
+  });
 }
 
 // Directly invokes one tool server-side (bypasses Zora's own tool choice) —
@@ -521,11 +542,13 @@ async function interactiveChat(token, { files = [], open, initialHistory = [] } 
   console.log(c('Type your message and press Enter to chat. Type "exit" to quit, or /commands to see everything else you can do.', 'gray'));
   console.log();
 
+  const promptText = c('you> ', 'steelBlue');
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
-    prompt: c('you> ', 'steelBlue'),
+    prompt: promptText,
   });
+  enableSlashCommandHighlight(rl, promptText);
   const history = [...initialHistory];
   if (initialHistory.length > 0) {
     console.log(c(`Resumed previous session (${initialHistory.length / 2} turn(s)).`, 'gray'));

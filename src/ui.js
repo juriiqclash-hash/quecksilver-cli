@@ -3,6 +3,7 @@
 // stays simple.
 
 import { execFile } from 'child_process';
+import readline from 'readline';
 
 const ESC = '\x1b[';
 const RESET = `${ESC}0m`;
@@ -147,6 +148,35 @@ export function openPath(target) {
       console.log('Could not open it automatically. Open this manually:');
       console.log(target);
     }
+  });
+}
+
+// Recolors the input line as steelBlue whenever it starts with "/", so
+// typing a slash command gives instant visual feedback that it's recognized.
+// readline owns the line's rendering and has no hook for syntax highlighting,
+// so this redraws the line itself right after readline updates its internal
+// buffer on each keystroke. Best-effort: no-op if stdout isn't a real TTY,
+// and any failure (e.g. a future Node readline internals change) is swallowed
+// rather than crashing the chat.
+export function enableSlashCommandHighlight(rl, promptColored) {
+  if (!process.stdout.isTTY) return;
+  const promptVisibleLen = visibleLength(promptColored);
+
+  process.stdin.on('keypress', (_char, key) => {
+    if (key && (key.name === 'return' || key.name === 'enter')) return;
+    setImmediate(() => {
+      try {
+        if (rl.closed) return;
+        const line = rl.line ?? '';
+        const text = line.startsWith('/') ? c(line, 'steelBlue') : line;
+        readline.cursorTo(process.stdout, 0);
+        readline.clearLine(process.stdout, 0);
+        process.stdout.write(promptColored + text);
+        readline.cursorTo(process.stdout, promptVisibleLen + rl.cursor);
+      } catch {
+        // Best-effort visual polish — never worth crashing the session over.
+      }
+    });
   });
 }
 
