@@ -1,23 +1,9 @@
 import http from 'http';
-import { exec } from 'child_process';
 import { saveToken } from './config.js';
+import { openPath } from './ui.js';
 
 const PORT = 51234;
 const APP_URL = 'https://quecksilver.ch';
-
-function openBrowser(url) {
-  const platform = process.platform;
-  const cmd =
-    platform === 'win32' ? `start "" "${url}"` :
-    platform === 'darwin' ? `open "${url}"` :
-    `xdg-open "${url}"`;
-  exec(cmd, (err) => {
-    if (err) {
-      console.log('Could not open the browser automatically. Open this link manually:');
-      console.log(url);
-    }
-  });
-}
 
 // Runs the browser login flow and resolves with the access token once the
 // user authorizes it on the /cli-auth confirmation page. Does NOT print a
@@ -61,7 +47,7 @@ export function runLoginFlow() {
 
     server.listen(PORT, () => {
       console.log('Opening browser to log in...');
-      openBrowser(loginUrl);
+      openPath(loginUrl);
     });
 
     setTimeout(() => {

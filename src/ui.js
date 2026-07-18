@@ -2,6 +2,8 @@
 // pixel mascot — deliberately dependency-free (no chalk/boxen) so publishing
 // stays simple.
 
+import { exec } from 'child_process';
+
 const ESC = '\x1b[';
 const RESET = `${ESC}0m`;
 
@@ -127,6 +129,22 @@ export function startThinkingSpinner() {
       if (finalNote) console.log(finalNote);
     },
   };
+}
+
+// Opens a local path or URL in the OS default application/browser — shared
+// by the login flow (auth.js) and by --open for saved generated files.
+export function openPath(target) {
+  const platform = process.platform;
+  const cmd =
+    platform === 'win32' ? `start "" "${target}"` :
+    platform === 'darwin' ? `open "${target}"` :
+    `xdg-open "${target}"`;
+  exec(cmd, (err) => {
+    if (err) {
+      console.log('Could not open it automatically. Open this manually:');
+      console.log(target);
+    }
+  });
 }
 
 // Waits for a single keypress (any key counts as "continue") without

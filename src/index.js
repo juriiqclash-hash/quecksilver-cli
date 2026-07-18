@@ -1,7 +1,8 @@
 import readline from 'readline';
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync, statSync, mkdirSync, writeFileSync } from 'fs';
 import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import { dirname, join, extname, basename } from 'path';
+import { homedir } from 'os';
 import { getToken } from './config.js';
 import { runLoginFlow } from './auth.js';
 import { c, box, mascot, centerBlock, startThinkingSpinner } from './ui.js';
@@ -14,6 +15,26 @@ const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 const ENDPOINT = `${SUPABASE_URL}/functions/v1/cli-chat`;
 const VERSION = pkg.version;
 const BANNER_WIDTH = 46;
+
+// Keep in sync with the server-side cap in supabase/functions/cli-chat/index.ts.
+const MAX_FILE_BYTES = 4 * 1024 * 1024;
+const MIME_BY_EXT = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+  '.pdf': 'application/pdf',
+  '.md': 'text/markdown',
+  '.csv': 'text/csv',
+  '.json': 'application/json',
+};
+const EXT_BY_IMAGE_MIME = {
+  'image/png': '.png',
+  'image/jpeg': '.jpg',
+  'image/webp': '.webp',
+  'image/gif': '.gif',
+};
 
 function decodeJwt(token) {
   try {
@@ -68,7 +89,131 @@ function printAccountPanel({ email, isPro }) {
   console.log();
 }
 
-async function askQuecksilver(prompt, history, token) {
+// Reads local files given via --file/-f into the {name, mimeType, data}
+// shape cli-chat expects. Unrecognized extensions default to text/plain,
+// which covers most code files (.js, .py, .go, ...) without an exhaustive list.
+function guessMimeType(path) {
+  const ext = extname(path).toLowerCase();
+  return MIME_BY_EXT[ext] || 'text/plain';
+}
+
+function readAttachments(paths) {
+  return paths.map((path) => {
+    if (!existsSync(path)) throw new Error(`File not found: ${path}`);
+    const size = statSync(path).size;
+    if (size > MAX_FILE_BYTES) {
+      throw new Error(`File too large (max ${MAX_FILE_BYTES / (1024 * 1024)}MB): ${path}`);
+    }
+    return {
+      name: basename(path),
+      mimeType: guessMimeType(path),
+      data: readFileSync(path).toString('base64'),
+    };
+  });
+}
+
+// Resolves once with the piped content, or null immediately if stdin is a
+// real terminal (nothing piped in) — so it never blocks interactive mode.
+function readStdin() {
+  return new Promise((resolve) => {
+    if (process.stdin.isTTY) { resolve(null); return; }
+    let data = '';
+    process.stdin.setEncoding('utf-8');
+    process.stdin.on('data', (chunk) => { data += chunk; });
+    process.stdin.on('end', () => resolve(data));
+    process.stdin.on('error', () => resolve(null));
+  });
+}
+
+// Saves image/document attachments from a cli-chat response to
+// ~/quecksilver/{images,documents}/ and returns the saved paths.
+function saveAttachments(attachments) {
+  const saved = [];
+  for (const att of attachments || []) {
+    if (att.kind === 'image') {
+      const dir = join(homedir(), 'quecksilver', 'images');
+      mkdirSync(dir, { recursive: true });
+      const ext = EXT_BY_IMAGE_MIME[att.mimeType] || '.png';
+      const filePath = join(dir, `image-${Date.now()}${ext}`);
+      writeFileSync(filePath, Buffer.from(att.base64, 'base64'));
+      saved.push(filePath);
+    } else if (att.kind === 'document') {
+      const dir = join(homedir(), 'quecksilver', 'documents');
+      mkdirSync(dir, { recursive: true });
+      const filePath = join(dir, att.filename || `document-${Date.now()}`);
+      writeFileSync(filePath, Buffer.from(att.base64, 'base64'));
+      saved.push(filePath);
+    }
+  }
+  return saved;
+}
+
+function printSources(sources) {
+  if (!sources || sources.length === 0) return;
+  console.log(c('Sources:', 'gray'));
+  sources.forEach((s, i) => console.log(c(`  [${i + 1}] ${s.title} — ${s.url}`, 'gray')));
+}
+
+function printSavedPaths(paths) {
+  paths.forEach((p) => console.log(c(`Saved: ${p}`, 'gray')));
+}
+
+async function askQuecksilver(prompt, history, token, files = [], { quiet = false } = {}) {
+  const spinner = quiet ? null : startThinkingSpinner();
+  const start = Date.now();
+
+  let response;
+  try {
+    response = await fetch(ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify({ prompt, history, files }),
+    });
+  } catch (err) {
+    spinner?.stop();
+    throw err;
+  }
+
+  if (response.status === 401) {
+    spinner?.stop();
+    console.log(c('Session expired. Run "quecksilver login" to sign in again.', 'red'));
+    process.exit(1);
+  }
+
+  if (response.status === 429) {
+    spinner?.stop();
+    console.log(c('Too many requests. Wait a bit and try again.', 'yellow'));
+    process.exit(1);
+  }
+
+  if (!response.ok) {
+    spinner?.stop();
+    const errBody = await response.json().catch(() => ({}));
+    console.error(c(`Error: ${response.status} ${errBody.error || response.statusText}`, 'red'));
+    process.exit(1);
+  }
+
+  const data = await response.json();
+  const elapsed = Math.max(1, Math.round((Date.now() - start) / 1000));
+  const tokenPart = data.usage?.totalTokens ? ` · ${data.usage.totalTokens} tokens` : '';
+  spinner?.stop(c(`✓ thought for ${elapsed}s${tokenPart}`, 'dim'));
+
+  return {
+    reply: data.reply || '(no reply received)',
+    attachments: data.attachments || [],
+    sources: data.sources || [],
+    usage: data.usage || null,
+  };
+}
+
+// Streaming variant of askQuecksilver: prints text as it arrives instead of
+// waiting for the full reply. Used for the normal (non --json) terminal UX;
+// --json keeps using the buffered askQuecksilver above since a single JSON
+// blob is simpler and more robust to parse for scripting.
+async function askQuecksilverStream(prompt, history, token, files = [], { prefix = '' } = {}) {
   const spinner = startThinkingSpinner();
   const start = Date.now();
 
@@ -80,7 +225,7 @@ async function askQuecksilver(prompt, history, token) {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${token}`,
       },
-      body: JSON.stringify({ prompt, history }),
+      body: JSON.stringify({ prompt, history, files, stream: true }),
     });
   } catch (err) {
     spinner.stop();
@@ -106,20 +251,85 @@ async function askQuecksilver(prompt, history, token) {
     process.exit(1);
   }
 
-  const data = await response.json();
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  let fullReply = '';
+  let started = false;
+  let spinnerStopped = false;
+  let final = null;
+
+  const stopSpinner = () => {
+    if (!spinnerStopped) { spinner.stop(); spinnerStopped = true; }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let ni;
+    while ((ni = buf.indexOf('\n\n')) !== -1) {
+      const line = buf.slice(0, ni).trim();
+      buf = buf.slice(ni + 2);
+      if (!line.startsWith('data: ')) continue;
+      const jsonStr = line.slice(6).trim();
+      if (!jsonStr) continue;
+      let evt;
+      try { evt = JSON.parse(jsonStr); } catch { continue; }
+
+      if (evt.error) {
+        stopSpinner();
+        console.error(c(`Error: ${evt.error}`, 'red'));
+      } else if (evt.text) {
+        if (!started) {
+          stopSpinner();
+          started = true;
+          process.stdout.write('\n' + prefix);
+        }
+        process.stdout.write(evt.text);
+        fullReply += evt.text;
+      } else if (evt.done) {
+        final = evt;
+      }
+    }
+  }
+
+  stopSpinner();
+  if (started) process.stdout.write('\n');
+
   const elapsed = Math.max(1, Math.round((Date.now() - start) / 1000));
-  const tokenPart = data.usage?.totalTokens ? ` · ${data.usage.totalTokens} tokens` : '';
-  spinner.stop(c(`✓ thought for ${elapsed}s${tokenPart}`, 'dim'));
+  const tokenPart = final?.usage?.totalTokens ? ` · ${final.usage.totalTokens} tokens` : '';
+  console.log(c(`✓ thought for ${elapsed}s${tokenPart}`, 'dim'));
 
-  return data.reply || '(no reply received)';
+  return {
+    reply: fullReply || '(no reply received)',
+    attachments: final?.attachments || [],
+    sources: final?.sources || [],
+    usage: final?.usage || null,
+  };
 }
 
-async function oneOff(prompt, token) {
-  const reply = await askQuecksilver(prompt, [], token);
-  console.log('\n' + reply);
+async function oneOff(prompt, token, { files = [], output, json } = {}) {
+  const result = json
+    ? await askQuecksilver(prompt, [], token, files, { quiet: true })
+    : await askQuecksilverStream(prompt, [], token, files);
+
+  if (json) {
+    console.log(JSON.stringify(result));
+  } else {
+    printSources(result.sources);
+  }
+
+  const saved = saveAttachments(result.attachments);
+  if (!json) printSavedPaths(saved);
+
+  if (output) {
+    writeFileSync(output, result.reply, 'utf-8');
+    if (!json) console.log(c(`Saved reply to ${output}`, 'gray'));
+  }
 }
 
-async function interactiveChat(token) {
+async function interactiveChat(token, { files = [] } = {}) {
   console.log(c('Type your message and press Enter to chat. Type "exit" to quit.', 'gray'));
   console.log();
 
@@ -129,6 +339,7 @@ async function interactiveChat(token) {
     prompt: c('you> ', 'steelBlue'),
   });
   const history = [];
+  let pendingFiles = files;
 
   rl.prompt();
 
@@ -138,10 +349,13 @@ async function interactiveChat(token) {
     if (text === 'exit' || text === 'quit') { rl.close(); return; }
 
     try {
-      const reply = await askQuecksilver(text, history, token);
-      console.log('\n' + c('zora> ', 'bold') + reply + '\n');
+      const result = await askQuecksilverStream(text, history, token, pendingFiles, { prefix: c('zora> ', 'bold') });
+      pendingFiles = [];
+      console.log();
+      printSources(result.sources);
+      printSavedPaths(saveAttachments(result.attachments));
       history.push({ role: 'user', text });
-      history.push({ role: 'model', text: reply });
+      history.push({ role: 'model', text: result.reply });
     } catch (err) {
       console.error(c(`Connection error: ${err.message}`, 'red'));
     }
@@ -157,33 +371,56 @@ async function interactiveChat(token) {
 
 // Shared "start a session" step: shows the account panel, then drops into
 // either a one-off answer or the interactive chat loop.
-async function startSession(token, args) {
-  const account = await fetchAccountInfo(token);
-  printAccountPanel(account);
+async function startSession(token, options) {
+  if (!options.json) {
+    const account = await fetchAccountInfo(token);
+    printAccountPanel(account);
+  }
 
-  const prompt = args.join(' ').trim();
+  let files = [];
+  try {
+    files = readAttachments(options.files || []);
+  } catch (err) {
+    console.log(c(err.message, 'red'));
+    process.exit(1);
+  }
+
+  const stdinText = await readStdin();
+  if (stdinText && stdinText.trim()) {
+    files.push({ name: 'stdin', mimeType: 'text/plain', data: Buffer.from(stdinText, 'utf-8').toString('base64') });
+  }
+
+  let prompt = (options.promptArgs || []).join(' ').trim();
+  if (!prompt && files.length > 0) {
+    prompt = 'Please analyze the attached content.';
+  }
+
   if (prompt) {
-    await oneOff(prompt, token);
+    await oneOff(prompt, token, { files, output: options.output, json: options.json });
   } else {
-    await interactiveChat(token);
+    await interactiveChat(token, { files });
   }
 }
 
 // `quecksilver` with no subcommand: shows the banner, and either starts
 // chatting (already logged in) or tells the user to run `quecksilver login`.
-export async function main(args) {
-  printWelcomeBanner();
+export async function main(options) {
+  if (!options.json) printWelcomeBanner();
 
   const token = getToken();
 
   if (!token) {
+    if (options.json) {
+      console.log(JSON.stringify({ error: 'Not logged in. Run "quecksilver login".' }));
+      process.exit(1);
+    }
     console.log(c('You are not logged in yet.', 'yellow'));
     console.log(`Run ${c('quecksilver login', 'steelBlue')} to sign in and get started.`);
     console.log();
     return;
   }
 
-  await startSession(token, args);
+  await startSession(token, options);
 }
 
 // `quecksilver login`: runs the browser auth flow, then prints a clear
