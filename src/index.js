@@ -4,7 +4,7 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { getToken } from './config.js';
 import { runLoginFlow } from './auth.js';
-import { c, box, mascot, centerBlock, startThinkingSpinner, waitForKeypress } from './ui.js';
+import { c, box, mascot, centerBlock, startThinkingSpinner } from './ui.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'));
@@ -186,9 +186,8 @@ export async function main(args) {
   await startSession(token, args);
 }
 
-// `quecksilver login`: runs the browser auth flow, waits for the user to
-// press a key on the green "Login successful" line, then goes straight
-// into the welcome banner + account panel + chat — no second command needed.
+// `quecksilver login`: runs the browser auth flow, then prints a clear
+// confirmation and next step.
 export async function loginCommand() {
   let token;
   try {
@@ -198,9 +197,7 @@ export async function loginCommand() {
     process.exit(1);
   }
 
-  console.log(c('Login successful.', 'green') + c(' Press any key to continue…', 'gray'));
-  await waitForKeypress();
-
-  printWelcomeBanner();
-  await startSession(token, []);
+  console.log(c('Login successful.', 'green'));
+  console.log(`Run ${c('quecksilver', 'steelBlue')} to start chatting.`);
+  process.exit(0);
 }
