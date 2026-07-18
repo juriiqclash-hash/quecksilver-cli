@@ -4,7 +4,6 @@ import { saveToken } from './config.js';
 
 const PORT = 51234;
 const APP_URL = 'https://quecksilver.ch';
-const LOGIN_URL = `${APP_URL}/cli-auth?redirect=${encodeURIComponent(`http://localhost:${PORT}/callback`)}`;
 
 function openBrowser(url) {
   const platform = process.platform;
@@ -20,44 +19,67 @@ function openBrowser(url) {
   });
 }
 
-export function login() {
-  const server = http.createServer((req, res) => {
-    const url = new URL(req.url, `http://localhost:${PORT}`);
-    if (url.pathname !== '/callback') {
-      res.writeHead(404);
-      res.end();
-      return;
-    }
+// Runs the browser login flow and resolves with the access token once the
+// user authorizes it on the /cli-auth confirmation page. Does NOT exit the
+// process — callers decide what happens next (used both by the standalone
+// "quecksilver login" command and by the main flow when no token is saved yet).
+export function runLoginFlow() {
+  return new Promise((resolve, reject) => {
+    const loginUrl = `${APP_URL}/cli-auth?redirect=${encodeURIComponent(`http://localhost:${PORT}/callback`)}`;
 
-    const token = url.searchParams.get('token');
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-
-    if (token) {
-      saveToken(token);
-      res.end('<html><body style="font-family: sans-serif; padding: 40px;">Login successful! You can close this window and return to the terminal.</body></html>');
-    } else {
-      res.end('<html><body style="font-family: sans-serif; padding: 40px;">Login failed: no token received.</body></html>');
-    }
-
-    res.on('finish', () => {
-      if (token) {
-        console.log('Logged in! Run "quecksilver" to chat, or "quecksilver \\"your question\\"" for a single answer.');
-      } else {
-        console.log('Login failed: no token received.');
+    const server = http.createServer((req, res) => {
+      const url = new URL(req.url, `http://localhost:${PORT}`);
+      if (url.pathname !== '/callback') {
+        res.writeHead(404);
+        res.end();
+        return;
       }
-      server.close();
-      setTimeout(() => process.exit(token ? 0 : 1), 200);
+
+      const token = url.searchParams.get('token');
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.end(
+        token
+          ? '<html><body style="font-family: sans-serif; padding: 40px;">Login successful! You can close this window and return to the terminal.</body></html>'
+          : '<html><body style="font-family: sans-serif; padding: 40px;">Login failed: no token received.</body></html>'
+      );
+
+      // Wait for the response to actually be flushed before closing the
+      // server / resolving — closing too early can show the browser a
+      // "connection refused" page even though the login itself succeeded.
+      res.on('finish', () => {
+        server.close();
+        setTimeout(() => {
+          if (token) {
+            saveToken(token);
+            resolve(token);
+          } else {
+            reject(new Error('No token received'));
+          }
+        }, 150);
+      });
     });
-  });
 
-  server.listen(PORT, () => {
-    console.log('Opening browser to log in...');
-    openBrowser(LOGIN_URL);
-  });
+    server.listen(PORT, () => {
+      console.log('Opening browser to log in...');
+      openBrowser(loginUrl);
+    });
 
-  setTimeout(() => {
-    console.log('Login timed out (5 min). Try again with "quecksilver login".');
-    server.close();
+    setTimeout(() => {
+      server.close();
+      reject(new Error('Login timed out (5 min). Try again.'));
+    }, 5 * 60 * 1000);
+  });
+}
+
+// Standalone `quecksilver login` / `quecksilver logout`-adjacent command:
+// runs the flow and exits with a clear message.
+export async function login() {
+  try {
+    await runLoginFlow();
+    console.log('Logged in! Run "quecksilver" to start chatting.');
+    process.exit(0);
+  } catch (err) {
+    console.log(`Login failed: ${err.message}`);
     process.exit(1);
-  }, 5 * 60 * 1000);
+  }
 }
