@@ -158,6 +158,55 @@ function printSavedPaths(paths) {
   paths.forEach((p) => console.log(c(`Saved: ${p}`, 'gray')));
 }
 
+// Directly invokes one tool server-side (bypasses Zora's own tool choice) —
+// backs the /search, /image and /doc slash commands.
+async function askForcedTool(forceTool, token) {
+  const spinner = startThinkingSpinner();
+
+  let response;
+  try {
+    response = await fetch(ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify({ forceTool }),
+    });
+  } catch (err) {
+    spinner.stop();
+    throw err;
+  }
+
+  if (response.status === 401) {
+    spinner.stop();
+    console.log(c('Session expired. Run "quecksilver login" to sign in again.', 'red'));
+    process.exit(1);
+  }
+
+  if (response.status === 429) {
+    spinner.stop();
+    console.log(c('Too many requests. Wait a bit and try again.', 'yellow'));
+    process.exit(1);
+  }
+
+  if (!response.ok) {
+    spinner.stop();
+    const errBody = await response.json().catch(() => ({}));
+    console.error(c(`Error: ${response.status} ${errBody.error || response.statusText}`, 'red'));
+    process.exit(1);
+  }
+
+  const data = await response.json();
+  spinner.stop();
+
+  return {
+    reply: data.reply || '(no reply received)',
+    attachments: data.attachments || [],
+    sources: data.sources || [],
+  };
+}
+
 async function askQuecksilver(prompt, history, token, files = [], { quiet = false } = {}) {
   const spinner = quiet ? null : startThinkingSpinner();
   const start = Date.now();
@@ -331,7 +380,8 @@ async function oneOff(prompt, token, { files = [], output, json } = {}) {
 
 async function interactiveChat(token, { files = [] } = {}) {
   console.log(c('Type your message and press Enter to chat. Type "exit" to quit.', 'gray'));
-  console.log(c('Type /file <path> to attach a local file to your next message.', 'gray'));
+  console.log(c('Slash commands: /file <path>, /search <query>, /image <prompt>,', 'gray'));
+  console.log(c('/doc <docx|xlsx|pptx|pdf|markdown|csv> <topic>, /output <path>', 'gray'));
   console.log();
 
   const rl = readline.createInterface({
@@ -341,6 +391,24 @@ async function interactiveChat(token, { files = [] } = {}) {
   });
   const history = [];
   let pendingFiles = files;
+  let pendingOutput = null;
+
+  const stripQuotes = (s) => s.trim().replace(/^"(.*)"$/, '$1');
+
+  // Shared tail for both the forced-tool and normal chat paths: print
+  // sources/saved attachments, honor a queued /output path, and record the
+  // turn in history so follow-up questions can reference it.
+  const finishTurn = (text, result) => {
+    printSources(result.sources);
+    printSavedPaths(saveAttachments(result.attachments));
+    if (pendingOutput) {
+      writeFileSync(pendingOutput, result.reply, 'utf-8');
+      console.log(c(`Saved reply to ${pendingOutput}`, 'gray'));
+      pendingOutput = null;
+    }
+    history.push({ role: 'user', text });
+    history.push({ role: 'model', text: result.reply });
+  };
 
   rl.prompt();
 
@@ -351,7 +419,7 @@ async function interactiveChat(token, { files = [] } = {}) {
 
     const fileCmd = text.match(/^\/(?:file|attach)\s+(.+)$/i);
     if (fileCmd) {
-      const rawPath = fileCmd[1].trim().replace(/^"(.*)"$/, '$1');
+      const rawPath = stripQuotes(fileCmd[1]);
       try {
         const [attached] = readAttachments([rawPath]);
         pendingFiles = [...pendingFiles, attached];
@@ -363,14 +431,41 @@ async function interactiveChat(token, { files = [] } = {}) {
       return;
     }
 
+    const outputCmd = text.match(/^\/output\s+(.+)$/i);
+    if (outputCmd) {
+      pendingOutput = stripQuotes(outputCmd[1]);
+      console.log(c(`Your next reply will also be saved to ${pendingOutput}`, 'gray'));
+      rl.prompt();
+      return;
+    }
+
+    const searchCmd = text.match(/^\/search\s+(.+)$/i);
+    const imageCmd = text.match(/^\/image\s+(.+)$/i);
+    const docCmd = text.match(/^\/doc\s+(docx|xlsx|pptx|pdf|markdown|csv)\s+(.+)$/i);
+
+    if (searchCmd || imageCmd || docCmd) {
+      const forceTool = searchCmd
+        ? { name: 'web_search', args: { query: searchCmd[1] } }
+        : imageCmd
+          ? { name: 'create_image', args: { prompt: imageCmd[1] } }
+          : { name: 'create_document', args: { doc_type: docCmd[1].toLowerCase(), topic: docCmd[2] } };
+
+      try {
+        const result = await askForcedTool(forceTool, token);
+        console.log('\n' + c('zora> ', 'bold') + result.reply + '\n');
+        finishTurn(text, result);
+      } catch (err) {
+        console.error(c(`Connection error: ${err.message}`, 'red'));
+      }
+      rl.prompt();
+      return;
+    }
+
     try {
       const result = await askQuecksilverStream(text, history, token, pendingFiles, { prefix: c('zora> ', 'bold') });
       pendingFiles = [];
       console.log();
-      printSources(result.sources);
-      printSavedPaths(saveAttachments(result.attachments));
-      history.push({ role: 'user', text });
-      history.push({ role: 'model', text: result.reply });
+      finishTurn(text, result);
     } catch (err) {
       console.error(c(`Connection error: ${err.message}`, 'red'));
     }
