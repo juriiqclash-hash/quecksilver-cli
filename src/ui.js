@@ -91,3 +91,57 @@ export function centerBlock(block, width) {
     .map((line) => centerLine(line, width))
     .join('\n');
 }
+
+// A grab-bag of playful "thinking" verbs, shown at random while waiting on
+// a response — same idea as Claude Code's "Boondoggling…" status line.
+export const THINKING_WORDS = [
+  'Pondering', 'Percolating', 'Synthesizing', 'Ruminating', 'Contemplating',
+  'Calibrating', 'Number-crunching', 'Marinating', 'Untangling', 'Deliberating',
+  'Formulating', 'Cross-referencing', 'Weighing options', 'Connecting dots',
+  'Distilling', 'Composing', 'Reasoning', 'Brainstorming', 'Fine-tuning',
+  'Mulling it over',
+];
+
+const SPINNER_FRAMES = ['◐', '◓', '◑', '◒'];
+
+// Starts a live-updating "<spinner> <word>… (Ns)" status line. Returns a
+// handle with .stop(finalNote?) to clear the line and optionally print a
+// short summary (e.g. "thought for 4s · 204 tokens") in its place.
+export function startThinkingSpinner() {
+  const word = THINKING_WORDS[Math.floor(Math.random() * THINKING_WORDS.length)];
+  const start = Date.now();
+  let frame = 0;
+
+  process.stdout.write('\x1b[?25l'); // hide cursor
+  const interval = setInterval(() => {
+    const elapsed = Math.floor((Date.now() - start) / 1000);
+    const spin = c(SPINNER_FRAMES[frame++ % SPINNER_FRAMES.length], 'steelBlue');
+    process.stdout.write(`\r${spin} ${c(word + '…', 'gray')} ${c(`(${elapsed}s)`, 'dim')}   `);
+  }, 250);
+
+  return {
+    stop(finalNote) {
+      clearInterval(interval);
+      process.stdout.write('\r\x1b[K'); // clear current line
+      process.stdout.write('\x1b[?25h'); // show cursor
+      if (finalNote) console.log(finalNote);
+    },
+  };
+}
+
+// Waits for a single keypress (any key counts as "continue") without
+// requiring a full Enter-terminated readline — mirrors "Press Enter to
+// continue…" prompts in other CLIs.
+export function waitForKeypress() {
+  return new Promise((resolve) => {
+    const stdin = process.stdin;
+    const wasRaw = stdin.isRaw;
+    if (stdin.setRawMode) stdin.setRawMode(true);
+    stdin.resume();
+    stdin.once('data', () => {
+      if (stdin.setRawMode) stdin.setRawMode(wasRaw ?? false);
+      stdin.pause();
+      resolve();
+    });
+  });
+}

@@ -20,9 +20,9 @@ function openBrowser(url) {
 }
 
 // Runs the browser login flow and resolves with the access token once the
-// user authorizes it on the /cli-auth confirmation page. Does NOT exit the
-// process — callers decide what happens next (used both by the standalone
-// "quecksilver login" command and by the main flow when no token is saved yet).
+// user authorizes it on the /cli-auth confirmation page. Does NOT print a
+// final message or exit — the caller (index.js's loginCommand) decides what
+// happens after a successful login (e.g. "press any key to continue").
 export function runLoginFlow() {
   return new Promise((resolve, reject) => {
     const loginUrl = `${APP_URL}/cli-auth?redirect=${encodeURIComponent(`http://localhost:${PORT}/callback`)}`;
@@ -69,17 +69,4 @@ export function runLoginFlow() {
       reject(new Error('Login timed out (5 min). Try again.'));
     }, 5 * 60 * 1000);
   });
-}
-
-// Standalone `quecksilver login` / `quecksilver logout`-adjacent command:
-// runs the flow and exits with a clear message.
-export async function login() {
-  try {
-    await runLoginFlow();
-    console.log('Logged in! Run "quecksilver" to start chatting.');
-    process.exit(0);
-  } catch (err) {
-    console.log(`Login failed: ${err.message}`);
-    process.exit(1);
-  }
 }

@@ -3,7 +3,8 @@ import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { getToken } from './config.js';
-import { c, box, mascot, centerBlock } from './ui.js';
+import { runLoginFlow } from './auth.js';
+import { c, box, mascot, centerBlock, startThinkingSpinner, waitForKeypress } from './ui.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'));
@@ -49,7 +50,7 @@ async function fetchAccountInfo(token) {
 
 function printWelcomeBanner() {
   console.log();
-  console.log(centerBlock(c('Welcome to QueckSilver AI', 'steelBlue') + c('', 'bold'), BANNER_WIDTH).replace(/\x1b\[0m$/, ''));
+  console.log(centerBlock(c('Welcome to QueckSilver AI', 'steelBlue'), BANNER_WIDTH));
   console.log(centerBlock(c(`v${VERSION}`, 'gray'), BANNER_WIDTH));
   console.log();
   console.log(centerBlock(mascot(), BANNER_WIDTH));
@@ -68,37 +69,52 @@ function printAccountPanel({ email, isPro }) {
 }
 
 async function askQuecksilver(prompt, history, token) {
-  const response = await fetch(ENDPOINT, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${token}`,
-    },
-    body: JSON.stringify({ prompt, history }),
-  });
+  const spinner = startThinkingSpinner();
+  const start = Date.now();
+
+  let response;
+  try {
+    response = await fetch(ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify({ prompt, history }),
+    });
+  } catch (err) {
+    spinner.stop();
+    throw err;
+  }
 
   if (response.status === 401) {
+    spinner.stop();
     console.log(c('Session expired. Run "quecksilver login" to sign in again.', 'red'));
     process.exit(1);
   }
 
   if (response.status === 429) {
+    spinner.stop();
     console.log(c('Too many requests. Wait a bit and try again.', 'yellow'));
     process.exit(1);
   }
 
   if (!response.ok) {
+    spinner.stop();
     const errBody = await response.json().catch(() => ({}));
     console.error(c(`Error: ${response.status} ${errBody.error || response.statusText}`, 'red'));
     process.exit(1);
   }
 
   const data = await response.json();
+  const elapsed = Math.max(1, Math.round((Date.now() - start) / 1000));
+  const tokenPart = data.usage?.totalTokens ? ` · ${data.usage.totalTokens} tokens` : '';
+  spinner.stop(c(`✓ thought for ${elapsed}s${tokenPart}`, 'dim'));
+
   return data.reply || '(no reply received)';
 }
 
 async function oneOff(prompt, token) {
-  console.log(c('Thinking...', 'gray'));
   const reply = await askQuecksilver(prompt, [], token);
   console.log('\n' + reply);
 }
@@ -139,6 +155,22 @@ async function interactiveChat(token) {
   });
 }
 
+// Shared "start a session" step: shows the account panel, then drops into
+// either a one-off answer or the interactive chat loop.
+async function startSession(token, args) {
+  const account = await fetchAccountInfo(token);
+  printAccountPanel(account);
+
+  const prompt = args.join(' ').trim();
+  if (prompt) {
+    await oneOff(prompt, token);
+  } else {
+    await interactiveChat(token);
+  }
+}
+
+// `quecksilver` with no subcommand: shows the banner, and either starts
+// chatting (already logged in) or tells the user to run `quecksilver login`.
 export async function main(args) {
   printWelcomeBanner();
 
@@ -151,14 +183,24 @@ export async function main(args) {
     return;
   }
 
-  const account = await fetchAccountInfo(token);
-  printAccountPanel(account);
+  await startSession(token, args);
+}
 
-  const prompt = args.join(' ').trim();
-
-  if (prompt) {
-    await oneOff(prompt, token);
-  } else {
-    await interactiveChat(token);
+// `quecksilver login`: runs the browser auth flow, waits for the user to
+// press a key on the green "Login successful" line, then goes straight
+// into the welcome banner + account panel + chat — no second command needed.
+export async function loginCommand() {
+  let token;
+  try {
+    token = await runLoginFlow();
+  } catch (err) {
+    console.log(c(`Login failed: ${err.message}`, 'red'));
+    process.exit(1);
   }
+
+  console.log(c('Login successful.', 'green') + c(' Press any key to continue…', 'gray'));
+  await waitForKeypress();
+
+  printWelcomeBanner();
+  await startSession(token, []);
 }
