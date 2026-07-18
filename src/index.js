@@ -3,7 +3,6 @@ import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { getToken } from './config.js';
-import { runLoginFlow } from './auth.js';
 import { c, box, mascot, centerBlock } from './ui.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -143,18 +142,13 @@ async function interactiveChat(token) {
 export async function main(args) {
   printWelcomeBanner();
 
-  let token = getToken();
+  const token = getToken();
 
   if (!token) {
-    console.log(c('You need to log in to continue.', 'yellow'));
-    try {
-      token = await runLoginFlow();
-      console.log(c('✔ Login successful.', 'green'));
-      console.log();
-    } catch (err) {
-      console.log(c(`Login failed: ${err.message}`, 'red'));
-      return;
-    }
+    console.log(c('You are not logged in yet.', 'yellow'));
+    console.log(`Run ${c('quecksilver login', 'steelBlue')} to sign in and get started.`);
+    console.log();
+    return;
   }
 
   const account = await fetchAccountInfo(token);
