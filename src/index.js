@@ -3,9 +3,11 @@ import { readFileSync, existsSync, statSync, mkdirSync, writeFileSync } from 'fs
 import { fileURLToPath } from 'url';
 import { dirname, join, extname, basename } from 'path';
 import { homedir } from 'os';
-import { getToken } from './config.js';
+import {
+  getToken, getAllSettings, getSetting, setSetting, saveLastSession, loadLastSession,
+} from './config.js';
 import { runLoginFlow } from './auth.js';
-import { c, box, mascot, centerBlock, startThinkingSpinner } from './ui.js';
+import { c, box, mascot, centerBlock, startThinkingSpinner, openPath } from './ui.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'));
@@ -89,6 +91,66 @@ function printAccountPanel({ email, isPro }) {
   console.log();
 }
 
+function parseSettingValue(raw) {
+  if (raw === 'true') return true;
+  if (raw === 'false') return false;
+  return raw;
+}
+
+function printSettings(settings) {
+  console.log(c('Settings:', 'gray'));
+  for (const [key, value] of Object.entries(settings)) {
+    console.log(c(`  ${key} = ${value}`, 'gray'));
+  }
+}
+
+async function printUsage(token) {
+  const account = await fetchAccountInfo(token);
+  const plan = account.isPro ? 'QueckSilver Pro' : 'QueckSilver Free';
+  console.log(c(`Plan: ${plan}`, 'gray'));
+  try {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/check-usage`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (res.ok) {
+      const data = await res.json();
+      console.log(c(`Service status: ${data.sleeping ? 'temporarily limited (daily budget reached)' : 'normal'} (${data.percentUsed}% of today's shared budget used)`, 'gray'));
+    }
+  } catch {
+    // Best-effort — usage info just won't show if this fails.
+  }
+  console.log(c('CLI rate limits: 30 chat requests / 15 min, 10 generations (image/document/music) / 15 min.', 'gray'));
+}
+
+// Simple numeric-segment comparison — good enough for x.y.z versions,
+// no need for a full semver dependency in a deliberately dependency-free CLI.
+function isNewerVersion(a, b) {
+  const pa = a.split('.').map(Number);
+  const pb = b.split('.').map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] || 0;
+    const y = pb[i] || 0;
+    if (x !== y) return x > y;
+  }
+  return false;
+}
+
+// Fire-and-forget: never blocks or fails startup, just prints a hint if a
+// newer version is published.
+async function checkForUpdate() {
+  try {
+    const res = await fetch('https://registry.npmjs.org/quecksilver-cli/latest', { signal: AbortSignal.timeout(1500) });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.version && isNewerVersion(data.version, VERSION)) {
+      console.log(c(`Update available: v${VERSION} → v${data.version} — run npm install -g quecksilver-cli@latest`, 'yellow'));
+      console.log();
+    }
+  } catch {
+    // Silent — registry hiccups should never affect normal use.
+  }
+}
+
 // Reads local files given via --file/-f into the {name, mimeType, data}
 // shape cli-chat expects. Unrecognized extensions default to text/plain,
 // which covers most code files (.js, .py, .go, ...) without an exhaustive list.
@@ -125,25 +187,41 @@ function readStdin() {
   });
 }
 
-// Saves image/document attachments from a cli-chat response to
-// ~/quecksilver/{images,documents}/ and returns the saved paths.
-function saveAttachments(attachments) {
+const EXT_BY_AUDIO_MIME = {
+  'audio/wav': '.wav',
+  'audio/mpeg': '.mp3',
+  'audio/mp3': '.mp3',
+};
+
+// Saves image/document/audio attachments from a cli-chat response to
+// ~/quecksilver/{images,documents,music}/ and returns the saved paths.
+// Opens each one in the OS default app afterward if `open` is true or the
+// user has autoOpen enabled in their config.
+function saveAttachments(attachments, { open } = {}) {
+  const shouldOpen = open ?? getSetting('autoOpen');
   const saved = [];
   for (const att of attachments || []) {
+    let filePath;
     if (att.kind === 'image') {
       const dir = join(homedir(), 'quecksilver', 'images');
       mkdirSync(dir, { recursive: true });
       const ext = EXT_BY_IMAGE_MIME[att.mimeType] || '.png';
-      const filePath = join(dir, `image-${Date.now()}${ext}`);
-      writeFileSync(filePath, Buffer.from(att.base64, 'base64'));
-      saved.push(filePath);
+      filePath = join(dir, `image-${Date.now()}${ext}`);
     } else if (att.kind === 'document') {
       const dir = join(homedir(), 'quecksilver', 'documents');
       mkdirSync(dir, { recursive: true });
-      const filePath = join(dir, att.filename || `document-${Date.now()}`);
-      writeFileSync(filePath, Buffer.from(att.base64, 'base64'));
-      saved.push(filePath);
+      filePath = join(dir, att.filename || `document-${Date.now()}`);
+    } else if (att.kind === 'audio') {
+      const dir = join(homedir(), 'quecksilver', 'music');
+      mkdirSync(dir, { recursive: true });
+      const ext = EXT_BY_AUDIO_MIME[att.mimeType] || '.wav';
+      filePath = join(dir, `music-${Date.now()}${ext}`);
+    } else {
+      continue;
     }
+    writeFileSync(filePath, Buffer.from(att.base64, 'base64'));
+    saved.push(filePath);
+    if (shouldOpen) openPath(filePath);
   }
   return saved;
 }
@@ -159,8 +237,11 @@ function printSavedPaths(paths) {
 }
 
 // Directly invokes one tool server-side (bypasses Zora's own tool choice) —
-// backs the /search, /image and /doc slash commands.
-async function askForcedTool(forceTool, token) {
+// backs the /search, /image, /doc and /music slash commands (and their
+// --search/--image/--doc/--music startup-flag equivalents). `files` carries
+// any pending attachments — e.g. an image to use as a create_image edit
+// reference.
+async function askForcedTool(forceTool, token, files = []) {
   const spinner = startThinkingSpinner();
 
   let response;
@@ -171,7 +252,7 @@ async function askForcedTool(forceTool, token) {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${token}`,
       },
-      body: JSON.stringify({ forceTool }),
+      body: JSON.stringify({ forceTool, files }),
     });
   } catch (err) {
     spinner.stop();
@@ -358,10 +439,10 @@ async function askQuecksilverStream(prompt, history, token, files = [], { prefix
   };
 }
 
-async function oneOff(prompt, token, { files = [], output, json } = {}) {
+async function oneOff(prompt, token, { files = [], output, json, open, history = [] } = {}) {
   const result = json
-    ? await askQuecksilver(prompt, [], token, files, { quiet: true })
-    : await askQuecksilverStream(prompt, [], token, files);
+    ? await askQuecksilver(prompt, history, token, files, { quiet: true })
+    : await askQuecksilverStream(prompt, history, token, files);
 
   if (json) {
     console.log(JSON.stringify(result));
@@ -369,7 +450,31 @@ async function oneOff(prompt, token, { files = [], output, json } = {}) {
     printSources(result.sources);
   }
 
-  const saved = saveAttachments(result.attachments);
+  const saved = saveAttachments(result.attachments, { open });
+  if (!json) printSavedPaths(saved);
+
+  if (output) {
+    writeFileSync(output, result.reply, 'utf-8');
+    if (!json) console.log(c(`Saved reply to ${output}`, 'gray'));
+  }
+
+  saveLastSession([...history, { role: 'user', text: prompt }, { role: 'model', text: result.reply }]);
+}
+
+// Startup-flag equivalent of the /search, /image, /doc, /music slash
+// commands (--search/--image/--doc/--music) — a single forced-tool call
+// with no interactive session.
+async function oneOffForcedTool(forceTool, token, { files = [], output, json, open } = {}) {
+  const result = await askForcedTool(forceTool, token, files);
+
+  if (json) {
+    console.log(JSON.stringify(result));
+  } else {
+    console.log('\n' + result.reply);
+    printSources(result.sources);
+  }
+
+  const saved = saveAttachments(result.attachments, { open });
   if (!json) printSavedPaths(saved);
 
   if (output) {
@@ -378,10 +483,10 @@ async function oneOff(prompt, token, { files = [], output, json } = {}) {
   }
 }
 
-async function interactiveChat(token, { files = [] } = {}) {
+async function interactiveChat(token, { files = [], open, initialHistory = [] } = {}) {
   console.log(c('Type your message and press Enter to chat. Type "exit" to quit.', 'gray'));
-  console.log(c('Slash commands: /file <path>, /search <query>, /image <prompt>,', 'gray'));
-  console.log(c('/doc <docx|xlsx|pptx|pdf|markdown|csv> <topic>, /output <path>', 'gray'));
+  console.log(c('Slash commands: /file, /search, /image, /doc <type> <topic>, /music,', 'gray'));
+  console.log(c('/output <path>, /open, /continue, /config, /usage', 'gray'));
   console.log();
 
   const rl = readline.createInterface({
@@ -389,18 +494,24 @@ async function interactiveChat(token, { files = [] } = {}) {
     output: process.stdout,
     prompt: c('you> ', 'steelBlue'),
   });
-  const history = [];
+  const history = [...initialHistory];
+  if (initialHistory.length > 0) {
+    console.log(c(`Resumed previous session (${initialHistory.length / 2} turn(s)).`, 'gray'));
+    console.log();
+  }
   let pendingFiles = files;
   let pendingOutput = null;
+  let sessionOpen = open ?? getSetting('autoOpen');
 
   const stripQuotes = (s) => s.trim().replace(/^"(.*)"$/, '$1');
 
   // Shared tail for both the forced-tool and normal chat paths: print
-  // sources/saved attachments, honor a queued /output path, and record the
-  // turn in history so follow-up questions can reference it.
+  // sources/saved attachments, honor a queued /output path, record the turn
+  // in history so follow-up questions can reference it, and persist the
+  // growing history so --continue/-c can pick it up later.
   const finishTurn = (text, result) => {
     printSources(result.sources);
-    printSavedPaths(saveAttachments(result.attachments));
+    printSavedPaths(saveAttachments(result.attachments, { open: sessionOpen }));
     if (pendingOutput) {
       writeFileSync(pendingOutput, result.reply, 'utf-8');
       console.log(c(`Saved reply to ${pendingOutput}`, 'gray'));
@@ -408,6 +519,7 @@ async function interactiveChat(token, { files = [] } = {}) {
     }
     history.push({ role: 'user', text });
     history.push({ role: 'model', text: result.reply });
+    saveLastSession(history);
   };
 
   rl.prompt();
@@ -439,19 +551,60 @@ async function interactiveChat(token, { files = [] } = {}) {
       return;
     }
 
+    if (/^\/open$/i.test(text)) {
+      sessionOpen = !sessionOpen;
+      console.log(c(`Auto-open is now ${sessionOpen ? 'on' : 'off'} for this session.`, 'gray'));
+      rl.prompt();
+      return;
+    }
+
+    if (/^\/continue$/i.test(text)) {
+      const previous = loadLastSession();
+      if (previous.length === 0) {
+        console.log(c('No previous session found.', 'gray'));
+      } else {
+        history.unshift(...previous);
+        console.log(c(`Loaded ${previous.length / 2} previous turn(s) into this conversation.`, 'gray'));
+      }
+      rl.prompt();
+      return;
+    }
+
+    const configCmd = text.match(/^\/config(?:\s+set\s+(\S+)\s+(\S+))?$/i);
+    if (configCmd) {
+      if (configCmd[1]) {
+        setSetting(configCmd[1], parseSettingValue(configCmd[2]));
+        console.log(c(`${configCmd[1]} = ${configCmd[2]}`, 'gray'));
+      } else {
+        printSettings(getAllSettings());
+      }
+      rl.prompt();
+      return;
+    }
+
+    if (/^\/usage$/i.test(text)) {
+      await printUsage(token);
+      rl.prompt();
+      return;
+    }
+
     const searchCmd = text.match(/^\/search\s+(.+)$/i);
     const imageCmd = text.match(/^\/image\s+(.+)$/i);
     const docCmd = text.match(/^\/doc\s+(docx|xlsx|pptx|pdf|markdown|csv)\s+(.+)$/i);
+    const musicCmd = text.match(/^\/music\s+(.+)$/i);
 
-    if (searchCmd || imageCmd || docCmd) {
+    if (searchCmd || imageCmd || docCmd || musicCmd) {
       const forceTool = searchCmd
         ? { name: 'web_search', args: { query: searchCmd[1] } }
         : imageCmd
           ? { name: 'create_image', args: { prompt: imageCmd[1] } }
-          : { name: 'create_document', args: { doc_type: docCmd[1].toLowerCase(), topic: docCmd[2] } };
+          : musicCmd
+            ? { name: 'create_music', args: { prompt: musicCmd[1] } }
+            : { name: 'create_document', args: { doc_type: docCmd[1].toLowerCase(), topic: docCmd[2] } };
 
       try {
-        const result = await askForcedTool(forceTool, token);
+        const result = await askForcedTool(forceTool, token, pendingFiles);
+        pendingFiles = [];
         console.log('\n' + c('zora> ', 'bold') + result.reply + '\n');
         finishTurn(text, result);
       } catch (err) {
@@ -480,10 +633,13 @@ async function interactiveChat(token, { files = [] } = {}) {
 }
 
 // Shared "start a session" step: shows the account panel, then drops into
-// either a one-off answer or the interactive chat loop.
+// either a forced-tool call, a one-off answer, or the interactive chat loop.
 async function startSession(token, options) {
   if (!options.json) {
-    const account = await fetchAccountInfo(token);
+    const [account] = await Promise.all([
+      fetchAccountInfo(token),
+      getSetting('checkUpdates') ? checkForUpdate() : Promise.resolve(),
+    ]);
     printAccountPanel(account);
   }
 
@@ -500,15 +656,24 @@ async function startSession(token, options) {
     files.push({ name: 'stdin', mimeType: 'text/plain', data: Buffer.from(stdinText, 'utf-8').toString('base64') });
   }
 
+  if (options.forceTool) {
+    await oneOffForcedTool(options.forceTool, token, { files, output: options.output, json: options.json, open: options.open });
+    return;
+  }
+
+  const continuedHistory = options.continueSession ? loadLastSession() : [];
+
   let prompt = (options.promptArgs || []).join(' ').trim();
   if (!prompt && files.length > 0) {
     prompt = 'Please analyze the attached content.';
   }
 
   if (prompt) {
-    await oneOff(prompt, token, { files, output: options.output, json: options.json });
+    await oneOff(prompt, token, {
+      files, output: options.output, json: options.json, open: options.open, history: continuedHistory,
+    });
   } else {
-    await interactiveChat(token, { files });
+    await interactiveChat(token, { files, open: options.open, initialHistory: continuedHistory });
   }
 }
 
@@ -547,4 +712,25 @@ export async function loginCommand() {
   console.log(c('Login successful.', 'green'));
   console.log(`Run ${c('quecksilver', 'steelBlue')} to start chatting.`);
   process.exit(0);
+}
+
+// `quecksilver config` / `quecksilver config set <key> <value>`.
+export async function configCommand(args) {
+  if (args[0] === 'set' && args[1] && args[2] !== undefined) {
+    setSetting(args[1], parseSettingValue(args[2]));
+    console.log(`${args[1]} = ${args[2]}`);
+  } else {
+    printSettings(getAllSettings());
+  }
+}
+
+// `quecksilver usage` — plan, global service status, and the CLI's own
+// rate limits.
+export async function usageCommand() {
+  const token = getToken();
+  if (!token) {
+    console.log('You are not logged in yet. Run "quecksilver login" first.');
+    process.exit(1);
+  }
+  await printUsage(token);
 }
