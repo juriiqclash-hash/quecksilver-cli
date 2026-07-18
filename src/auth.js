@@ -3,7 +3,6 @@ import { exec } from 'child_process';
 import { saveToken } from './config.js';
 
 const PORT = 51234;
-// TODO: replace with your real production domain once deployed.
 const APP_URL = 'https://quecksilver.ch';
 const LOGIN_URL = `${APP_URL}/cli-auth?redirect=${encodeURIComponent(`http://localhost:${PORT}/callback`)}`;
 
@@ -36,14 +35,19 @@ export function login() {
     if (token) {
       saveToken(token);
       res.end('<html><body style="font-family: sans-serif; padding: 40px;">Login successful! You can close this window and return to the terminal.</body></html>');
-      console.log('Logged in! Run "quecksilver" to chat, or "quecksilver \\"your question\\"" for a single answer.');
     } else {
       res.end('<html><body style="font-family: sans-serif; padding: 40px;">Login failed: no token received.</body></html>');
-      console.log('Login failed: no token received.');
     }
 
-    server.close();
-    process.exit(token ? 0 : 1);
+    res.on('finish', () => {
+      if (token) {
+        console.log('Logged in! Run "quecksilver" to chat, or "quecksilver \\"your question\\"" for a single answer.');
+      } else {
+        console.log('Login failed: no token received.');
+      }
+      server.close();
+      setTimeout(() => process.exit(token ? 0 : 1), 200);
+    });
   });
 
   server.listen(PORT, () => {
@@ -51,7 +55,6 @@ export function login() {
     openBrowser(LOGIN_URL);
   });
 
-  // Safety timeout so the CLI doesn't hang forever if the browser flow stalls.
   setTimeout(() => {
     console.log('Login timed out (5 min). Try again with "quecksilver login".');
     server.close();
