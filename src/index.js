@@ -50,7 +50,7 @@ async function fetchAccountInfo(token) {
 
 function printWelcomeBanner() {
   console.log();
-  console.log(centerBlock(c('Welcome to QueckSilver AI', 'brightBlue') + c('', 'bold'), BANNER_WIDTH).replace(/\x1b\[0m$/, ''));
+  console.log(centerBlock(c('Welcome to QueckSilver AI', 'steelBlue') + c('', 'bold'), BANNER_WIDTH).replace(/\x1b\[0m$/, ''));
   console.log(centerBlock(c(`v${VERSION}`, 'gray'), BANNER_WIDTH));
   console.log();
   console.log(centerBlock(mascot(), BANNER_WIDTH));
@@ -61,8 +61,8 @@ function printAccountPanel({ email, isPro }) {
   const plan = isPro ? 'QueckSilver Pro' : 'QueckSilver Free';
   console.log(
     box(
-      [c('Zora 6.1', 'bold') + c('  ·  ', 'gray') + c(plan, 'brightBlue'), c(email, 'gray')],
-      { color: 'brightBlue', minWidth: BANNER_WIDTH - 4 }
+      [c('Zora 6.1', 'bold') + c('  ·  ', 'gray') + c(plan, 'steelBlue'), c(email, 'gray')],
+      { color: 'steelBlue', minWidth: BANNER_WIDTH - 4 }
     )
   );
   console.log();
@@ -111,7 +111,7 @@ async function interactiveChat(token) {
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
-    prompt: c('you> ', 'brightBlue'),
+    prompt: c('you> ', 'steelBlue'),
   });
   const history = [];
 

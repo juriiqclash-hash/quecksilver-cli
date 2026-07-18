@@ -16,8 +16,11 @@ export const colors = {
   cyan: `${ESC}36m`,
   magenta: `${ESC}35m`,
   white: `${ESC}97m`,
-  blue: `${ESC}34m`,
-  brightBlue: `${ESC}94m`,
+  // QueckSilver brand steel-blue, pulled directly from --primary in
+  // src/index.css (dark theme, default accent): hsl(195 45% 55%) → rgb(89,166,192).
+  steelBlue: `${ESC}38;2;89;166;192m`,
+  // --zora-eye: hsl(216 8% 12%) → rgb(28,30,33), the mascot's eye color.
+  eyeDark: `${ESC}38;2;28;30;33m`,
 };
 
 export function c(text, color) {
@@ -31,7 +34,7 @@ export function visibleLength(str) {
 }
 
 // Renders a bordered box around the given lines.
-export function box(lines, { color = 'brightBlue', padding = 1, minWidth = 30 } = {}) {
+export function box(lines, { color = 'steelBlue', padding = 1, minWidth = 30 } = {}) {
   const contentWidth = Math.max(minWidth, ...lines.map(visibleLength));
   const innerWidth = contentWidth + padding * 2;
   const top = c('┌' + '─'.repeat(innerWidth) + '┐', color);
@@ -70,7 +73,7 @@ const MASCOT_GRID = [
   [0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0],
 ];
 
-export function mascot({ bodyColor = 'brightBlue', eyeColor = 'white' } = {}) {
+export function mascot({ bodyColor = 'steelBlue', eyeColor = 'eyeDark' } = {}) {
   return MASCOT_GRID.map((row) =>
     row
       .map((cell) => {
