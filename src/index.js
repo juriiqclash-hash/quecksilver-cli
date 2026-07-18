@@ -331,6 +331,7 @@ async function oneOff(prompt, token, { files = [], output, json } = {}) {
 
 async function interactiveChat(token, { files = [] } = {}) {
   console.log(c('Type your message and press Enter to chat. Type "exit" to quit.', 'gray'));
+  console.log(c('Type /file <path> to attach a local file to your next message.', 'gray'));
   console.log();
 
   const rl = readline.createInterface({
@@ -347,6 +348,20 @@ async function interactiveChat(token, { files = [] } = {}) {
     const text = line.trim();
     if (!text) { rl.prompt(); return; }
     if (text === 'exit' || text === 'quit') { rl.close(); return; }
+
+    const fileCmd = text.match(/^\/(?:file|attach)\s+(.+)$/i);
+    if (fileCmd) {
+      const rawPath = fileCmd[1].trim().replace(/^"(.*)"$/, '$1');
+      try {
+        const [attached] = readAttachments([rawPath]);
+        pendingFiles = [...pendingFiles, attached];
+        console.log(c(`Attached: ${attached.name} (will be sent with your next message)`, 'gray'));
+      } catch (err) {
+        console.log(c(err.message, 'red'));
+      }
+      rl.prompt();
+      return;
+    }
 
     try {
       const result = await askQuecksilverStream(text, history, token, pendingFiles, { prefix: c('zora> ', 'bold') });
