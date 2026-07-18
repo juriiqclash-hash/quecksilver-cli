@@ -164,20 +164,19 @@ export function enableSlashCommandHighlight(rl, promptColored, knownCommands) {
   const promptVisibleLen = visibleLength(promptColored);
   const known = new Set(knownCommands.map((k) => k.toLowerCase()));
 
-  // Only the command WORD needs to exactly match a known command — "/imag"
-  // stays plain, "/image" (with or without a trailing prompt yet) lights up.
-  const isRecognizedCommand = (line) => {
-    const match = line.match(/^\/(\S*)/);
-    return !!match && known.has(match[1].toLowerCase());
-  };
-
   process.stdin.on('keypress', (_char, key) => {
     if (key && (key.name === 'return' || key.name === 'enter')) return;
     setImmediate(() => {
       try {
         if (rl.closed) return;
         const line = rl.line ?? '';
-        const text = isRecognizedCommand(line) ? c(line, 'blue') : line;
+        // Only the "/word" token itself can be blue — everything from the
+        // first space onward (the command's argument text) stays plain,
+        // and it reverts to fully plain the moment the word stops being an
+        // exact match (e.g. "/image" -> "/images").
+        const match = line.match(/^(\/\S*)([\s\S]*)$/);
+        const isRecognized = !!match && known.has(match[1].slice(1).toLowerCase());
+        const text = isRecognized ? c(match[1], 'blue') + match[2] : line;
         readline.cursorTo(process.stdout, 0);
         readline.clearLine(process.stdout, 0);
         process.stdout.write(promptColored + text);
