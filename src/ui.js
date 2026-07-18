@@ -2,7 +2,7 @@
 // pixel mascot — deliberately dependency-free (no chalk/boxen) so publishing
 // stays simple.
 
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 
 const ESC = '\x1b[';
 const RESET = `${ESC}0m`;
@@ -135,11 +135,14 @@ export function startThinkingSpinner() {
 // by the login flow (auth.js) and by --open for saved generated files.
 export function openPath(target) {
   const platform = process.platform;
-  const cmd =
-    platform === 'win32' ? `start "" "${target}"` :
-    platform === 'darwin' ? `open "${target}"` :
-    `xdg-open "${target}"`;
-  exec(cmd, (err) => {
+  // execFile (not exec) — passes the path as a real argument instead of a
+  // shell string, so it can't get mangled by cmd.exe's quoting rules around
+  // `start` (a notoriously fragile combination when built as a single string).
+  const [cmd, args] =
+    platform === 'win32' ? ['cmd', ['/c', 'start', '', target]] :
+    platform === 'darwin' ? ['open', [target]] :
+    ['xdg-open', [target]];
+  execFile(cmd, args, (err) => {
     if (err) {
       console.log('Could not open it automatically. Open this manually:');
       console.log(target);

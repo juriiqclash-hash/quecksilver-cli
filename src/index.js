@@ -110,11 +110,13 @@ async function printUsage(token) {
   console.log(c(`Plan: ${plan}`, 'gray'));
   try {
     const res = await fetch(`${SUPABASE_URL}/functions/v1/check-usage`, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: `Bearer ${token}`, apikey: SUPABASE_ANON_KEY },
     });
     if (res.ok) {
       const data = await res.json();
       console.log(c(`Service status: ${data.sleeping ? 'temporarily limited (daily budget reached)' : 'normal'} (${data.percentUsed}% of today's shared budget used)`, 'gray'));
+    } else {
+      console.log(c(`(Service status unavailable: HTTP ${res.status})`, 'gray'));
     }
   } catch {
     // Best-effort — usage info just won't show if this fails.
@@ -234,6 +236,38 @@ function printSources(sources) {
 
 function printSavedPaths(paths) {
   paths.forEach((p) => console.log(c(`Saved: ${p}`, 'gray')));
+}
+
+// Full command reference — shown on demand via /commands (in-chat) or
+// `quecksilver --commands` (from the shell), not dumped on every startup.
+export function printCommandList() {
+  const lines = [
+    'Start-up flags (quecksilver --flag ...):',
+    '  --search "query"          Force a web search',
+    '  --image "prompt"          Generate or edit an image (with -f attached)',
+    '  --doc <type> "topic"      Generate a document (docx/xlsx/pptx/pdf/markdown/csv)',
+    '  --music "prompt"          Generate a short music track',
+    '  -f, --file <path>         Attach a local file (repeatable)',
+    '  -o, --output <path>       Also save the reply to a file',
+    '  --open                    Auto-open generated files',
+    '  -c, --continue            Resume the last local session',
+    '  --json                    Machine-readable output for scripting',
+    '',
+    'Subcommands:',
+    '  login / logout            Sign in / out',
+    '  config / config set k v   Show or change settings',
+    '  usage                     Show plan and rate limits',
+    '  --version, -v             Show the installed CLI version',
+    '',
+    'Slash commands (while chatting):',
+    '  /search, /image, /doc <type> <topic>, /music   Force a tool',
+    '  /file <path>              Attach a file to your next message',
+    '  /output <path>            Save your next reply to a file',
+    '  /open                     Toggle auto-open for this session',
+    '  /continue                 Merge the last session into this one',
+    '  /config, /usage           Same as the subcommands above',
+  ];
+  lines.forEach((l) => console.log(c(l, 'gray')));
 }
 
 // Directly invokes one tool server-side (bypasses Zora's own tool choice) —
@@ -484,9 +518,7 @@ async function oneOffForcedTool(forceTool, token, { files = [], output, json, op
 }
 
 async function interactiveChat(token, { files = [], open, initialHistory = [] } = {}) {
-  console.log(c('Type your message and press Enter to chat. Type "exit" to quit.', 'gray'));
-  console.log(c('Slash commands: /file, /search, /image, /doc <type> <topic>, /music,', 'gray'));
-  console.log(c('/output <path>, /open, /continue, /config, /usage', 'gray'));
+  console.log(c('Type your message and press Enter to chat. Type "exit" to quit, or /commands to see everything else you can do.', 'gray'));
   console.log();
 
   const rl = readline.createInterface({
@@ -588,6 +620,12 @@ async function interactiveChat(token, { files = [], open, initialHistory = [] } 
       return;
     }
 
+    if (/^\/(?:commands|help)$/i.test(text)) {
+      printCommandList();
+      rl.prompt();
+      return;
+    }
+
     const searchCmd = text.match(/^\/search\s+(.+)$/i);
     const imageCmd = text.match(/^\/image\s+(.+)$/i);
     const docCmd = text.match(/^\/doc\s+(docx|xlsx|pptx|pdf|markdown|csv)\s+(.+)$/i);
@@ -662,6 +700,15 @@ async function startSession(token, options) {
   }
 
   const continuedHistory = options.continueSession ? loadLastSession() : [];
+  if (options.continueSession && !options.json) {
+    console.log(c(
+      continuedHistory.length > 0
+        ? `Resumed previous session (${continuedHistory.length / 2} turn(s)).`
+        : 'No previous session found — starting fresh.',
+      'gray',
+    ));
+    console.log();
+  }
 
   let prompt = (options.promptArgs || []).join(' ').trim();
   if (!prompt && files.length > 0) {
