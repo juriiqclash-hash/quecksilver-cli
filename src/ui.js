@@ -37,21 +37,56 @@ export function visibleLength(str) {
   return str.replace(/\x1b\[[0-9;]*m/g, '').length;
 }
 
-// Renders a bordered box around the given lines.
-export function box(lines, { color = 'steelBlue', padding = 1, minWidth = 30 } = {}) {
-  const contentWidth = Math.max(minWidth, ...lines.map(visibleLength));
+// Renders a bordered box around the given lines. With `title`, the top
+// border reads "┌─ title ────┐" instead of a plain rule.
+export function box(lines, { color = 'steelBlue', padding = 1, minWidth = 30, title } = {}) {
+  const contentWidth = Math.max(minWidth, ...lines.map(visibleLength), title ? visibleLength(title) + 2 : 0);
   const innerWidth = contentWidth + padding * 2;
-  const top = c('┌' + '─'.repeat(innerWidth) + '┐', color);
-  const bottom = c('└' + '─'.repeat(innerWidth) + '┘', color);
   const pad = ' '.repeat(padding);
+
+  let top;
+  if (title) {
+    const label = ` ${title} `;
+    const trailing = Math.max(1, innerWidth - 1 - visibleLength(label));
+    top = c('┌─', color) + c(label, color) + c('─'.repeat(trailing), color) + c('┐', color);
+  } else {
+    top = c('┌' + '─'.repeat(innerWidth) + '┐', color);
+  }
+  const bottom = c('└' + '─'.repeat(innerWidth) + '┘', color);
 
   const body = lines.map((line) => {
     const visLen = visibleLength(line);
-    const rightPad = ' '.repeat(contentWidth - visLen);
+    const rightPad = ' '.repeat(Math.max(0, contentWidth - visLen));
     return c('│', color) + pad + line + rightPad + pad + c('│', color);
   });
 
   return [top, ...body, bottom].join('\n');
+}
+
+// Places two multi-line blocks side by side with a gap between them —
+// used to lay the welcome panel's stats box and the mountain motif out as
+// two columns, like Claude Code's own startup screen.
+export function sideBySide(leftBlock, rightBlock, gap = 2) {
+  const leftLines = leftBlock.split('\n');
+  const rightLines = rightBlock.split('\n');
+  const leftWidth = Math.max(...leftLines.map(visibleLength));
+  const height = Math.max(leftLines.length, rightLines.length);
+  const gapStr = ' '.repeat(gap);
+
+  const rows = [];
+  for (let i = 0; i < height; i++) {
+    const left = leftLines[i] ?? '';
+    const right = rightLines[i] ?? '';
+    rows.push(left + ' '.repeat(Math.max(0, leftWidth - visibleLength(left))) + gapStr + right);
+  }
+  return rows.join('\n');
+}
+
+// A full-width horizontal rule, framing the chat input like a text box —
+// printed right above the readline prompt on every turn.
+export function divider(width) {
+  const w = width || process.stdout.columns || 60;
+  return c('─'.repeat(Math.max(10, w)), 'dim');
 }
 
 export function centerLine(text, width) {
@@ -87,6 +122,65 @@ export function mascot({ bodyColor = 'steelBlue', eyeColor = 'eyeDark' } = {}) {
       })
       .join('')
   ).join('\n');
+}
+
+// A mountain-landscape backdrop for the mascot — two snow-capped peaks over
+// a scattering of stars, framed top and bottom by a dotted horizon line,
+// with the Zora mascot standing in front at the left. Rows come back
+// pre-colored and padded to `width` visible columns, so the block can be
+// dropped straight into a centered banner or the right-hand column of the
+// logged-in welcome panel.
+export function mountainScene(width = 44) {
+  const w = Math.max(26, width);
+  const skyRows = 5;
+  const mascotRows = MASCOT_GRID.length;
+  const grid = Array.from({ length: skyRows + mascotRows }, () => Array(w).fill(' '));
+  const paint = Array.from({ length: skyRows + mascotRows }, () => Array(w).fill(null));
+
+  const stamp = (row, startCol, text, color) => {
+    for (let i = 0; i < text.length; i++) {
+      const col = startCol + i;
+      if (col < 0 || col >= w) continue;
+      grid[row][col] = text[i];
+      paint[row][col] = color;
+    }
+  };
+  const centered = (center, width2) => Math.round(center - width2 / 2);
+
+  // Two peaks, tapering from a light "snow cap" at the apex down to a dark
+  // base, merging into one ridge by the last mountain row.
+  const peakCenters = [Math.round(w * 0.26), Math.round(w * 0.68)];
+  peakCenters.forEach((cx) => stamp(0, centered(cx, 3), '░░░', 'gray'));
+  peakCenters.forEach((cx) => stamp(1, centered(cx, 7), '▓▓▓▓▓▓▓', 'gray'));
+  peakCenters.forEach((cx) => stamp(2, centered(cx, 13), '▓▓▓▓▓▓▓▓▓▓▓▓▓', 'gray'));
+  const baseWidth = Math.min(w - 4, 40);
+  stamp(3, centered(w / 2, baseWidth), '▓'.repeat(baseWidth), 'gray');
+  stamp(4, centered(w / 2, Math.max(0, baseWidth - 6)), '░'.repeat(Math.max(0, baseWidth - 6)), 'dim');
+
+  // Scattered stars, skipping any cell a mountain already claimed.
+  const starSpots = [[0, 2], [0, w - 4], [1, w - 6], [2, 2], [5, w - 5], [7, w - 8]];
+  starSpots.forEach(([row, col]) => {
+    if (row < grid.length && col >= 0 && col < w && grid[row][col] === ' ') {
+      grid[row][col] = '*';
+      paint[row][col] = 'dim';
+    }
+  });
+
+  // The mascot, standing on the horizon at the left.
+  MASCOT_GRID.forEach((row, ri) => {
+    row.forEach((cell, ci) => {
+      if (cell === 0) return;
+      const col = 2 + ci * 2;
+      const color = cell === 2 ? 'eyeDark' : 'steelBlue';
+      stamp(skyRows + ri, col, '██', color);
+    });
+  });
+
+  const lines = grid.map((row, r) =>
+    row.map((ch, ci) => (ch === ' ' ? ' ' : c(ch, paint[r][ci] || 'gray'))).join('')
+  );
+  const border = c('.'.repeat(w), 'dim');
+  return [border, ...lines, border];
 }
 
 export function centerBlock(block, width) {

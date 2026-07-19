@@ -7,7 +7,10 @@ import {
   getToken, getAllSettings, getSetting, setSetting, saveLastSession, loadLastSession,
 } from './config.js';
 import { runLoginFlow } from './auth.js';
-import { c, box, mascot, centerBlock, startThinkingSpinner, openPath, enableSlashCommandHighlight } from './ui.js';
+import {
+  c, box, mascot, centerBlock, mountainScene, sideBySide, divider,
+  startThinkingSpinner, openPath, enableSlashCommandHighlight,
+} from './ui.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'));
@@ -79,23 +82,43 @@ async function fetchAccountInfo(token) {
   return { email, isPro };
 }
 
+// The logged-out splash: title, a centered dot, the version, and the
+// mountain-and-mascot motif — shown before we know whether to start a
+// session or point the user at `quecksilver login`.
 function printWelcomeBanner() {
   console.log();
   console.log(centerBlock(c('Welcome to QueckSilver AI', 'steelBlue'), BANNER_WIDTH));
+  console.log(centerBlock(c('·', 'gray'), BANNER_WIDTH));
   console.log(centerBlock(c(`v${VERSION}`, 'gray'), BANNER_WIDTH));
   console.log();
-  console.log(centerBlock(mascot(), BANNER_WIDTH));
+  console.log(centerBlock(mountainScene(40).join('\n'), BANNER_WIDTH));
   console.log();
 }
 
-function printAccountPanel({ email, isPro }) {
+// The logged-in welcome panel: a stats box (mascot, greeting, model, plan,
+// email, version, working directory) on the left, the mountain motif again
+// on the right — shown once per session start instead of the splash above.
+function printWelcomePanel({ email, isPro }) {
   const plan = isPro ? 'QueckSilver Pro' : 'QueckSilver Free';
-  console.log(
-    box(
-      [c('Zora 6.1', 'bold') + c('  ·  ', 'gray') + c(plan, 'steelBlue'), c(email, 'gray')],
-      { color: 'steelBlue', minWidth: BANNER_WIDTH - 4 }
-    )
-  );
+  const rawName = email.split('@')[0] || 'there';
+  const name = rawName.charAt(0).toUpperCase() + rawName.slice(1);
+
+  const leftLines = [
+    ...mascot().split('\n'),
+    '',
+    c(`Welcome back, ${name}!`, 'bold'),
+    '',
+    c('Model:   ', 'gray') + c('Zora 6.1', 'steelBlue'),
+    c('Plan:    ', 'gray') + c(plan, 'steelBlue'),
+    c('Email:   ', 'gray') + email,
+    c('Version: ', 'gray') + `v${VERSION}`,
+    c('Dir:     ', 'gray') + process.cwd(),
+  ];
+
+  const leftBox = box(leftLines, { color: 'steelBlue', minWidth: 34, title: 'QueckSilver CLI' });
+  const rightMotif = mountainScene(34).join('\n');
+
+  console.log(sideBySide(leftBox, rightMotif, 3));
   console.log();
 }
 
@@ -585,11 +608,18 @@ async function interactiveChat(token, { files = [], open, initialHistory = [] } 
     saveLastSession(history);
   };
 
-  rl.prompt();
+  // Frames the input line with a horizontal rule above it, so each turn's
+  // reply/thinking status sits above a clearly separated "input box".
+  const promptNext = () => {
+    console.log(divider());
+    rl.prompt();
+  };
+
+  promptNext();
 
   rl.on('line', async (line) => {
     const text = line.trim();
-    if (!text) { rl.prompt(); return; }
+    if (!text) { promptNext(); return; }
     if (text === 'exit' || text === 'quit') { rl.close(); return; }
 
     const fileCmd = text.match(/^\/(?:file|attach)\s+(.+)$/i);
@@ -602,7 +632,7 @@ async function interactiveChat(token, { files = [], open, initialHistory = [] } 
       } catch (err) {
         console.log(c(err.message, 'red'));
       }
-      rl.prompt();
+      promptNext();
       return;
     }
 
@@ -610,14 +640,14 @@ async function interactiveChat(token, { files = [], open, initialHistory = [] } 
     if (outputCmd) {
       pendingOutput = stripQuotes(outputCmd[1]);
       console.log(c(`Your next reply will also be saved to ${pendingOutput}`, 'gray'));
-      rl.prompt();
+      promptNext();
       return;
     }
 
     if (/^\/open$/i.test(text)) {
       sessionOpen = !sessionOpen;
       console.log(c(`Auto-open is now ${sessionOpen ? 'on' : 'off'} for this session.`, 'gray'));
-      rl.prompt();
+      promptNext();
       return;
     }
 
@@ -629,7 +659,7 @@ async function interactiveChat(token, { files = [], open, initialHistory = [] } 
         history.unshift(...previous);
         console.log(c(`Loaded ${previous.length / 2} previous turn(s) into this conversation.`, 'gray'));
       }
-      rl.prompt();
+      promptNext();
       return;
     }
 
@@ -641,19 +671,19 @@ async function interactiveChat(token, { files = [], open, initialHistory = [] } 
       } else {
         printSettings(getAllSettings());
       }
-      rl.prompt();
+      promptNext();
       return;
     }
 
     if (/^\/usage$/i.test(text)) {
       await printUsage(token);
-      rl.prompt();
+      promptNext();
       return;
     }
 
     if (/^\/(?:commands|help)$/i.test(text)) {
       printCommandList();
-      rl.prompt();
+      promptNext();
       return;
     }
 
@@ -679,7 +709,7 @@ async function interactiveChat(token, { files = [], open, initialHistory = [] } 
       } catch (err) {
         console.error(c(`Connection error: ${err.message}`, 'red'));
       }
-      rl.prompt();
+      promptNext();
       return;
     }
 
@@ -692,7 +722,7 @@ async function interactiveChat(token, { files = [], open, initialHistory = [] } 
       console.error(c(`Connection error: ${err.message}`, 'red'));
     }
 
-    rl.prompt();
+    promptNext();
   });
 
   rl.on('close', () => {
@@ -709,7 +739,7 @@ async function startSession(token, options) {
       fetchAccountInfo(token),
       getSetting('checkUpdates') ? checkForUpdate() : Promise.resolve(),
     ]);
-    printAccountPanel(account);
+    printWelcomePanel(account);
   }
 
   let files = [];
@@ -758,8 +788,6 @@ async function startSession(token, options) {
 // `quecksilver` with no subcommand: shows the banner, and either starts
 // chatting (already logged in) or tells the user to run `quecksilver login`.
 export async function main(options) {
-  if (!options.json) printWelcomeBanner();
-
   const token = getToken();
 
   if (!token) {
@@ -767,6 +795,7 @@ export async function main(options) {
       console.log(JSON.stringify({ error: 'Not logged in. Run "quecksilver login".' }));
       process.exit(1);
     }
+    printWelcomeBanner();
     console.log(c('You are not logged in yet.', 'yellow'));
     console.log(`Run ${c('quecksilver login', 'steelBlue')} to sign in and get started.`);
     console.log();
