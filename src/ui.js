@@ -140,6 +140,14 @@ export function padToBottom(usedLines, { reserve = 2 } = {}) {
   for (let i = 0; i < blanks; i++) console.log();
 }
 
+// Turns a named color into its background-color escape (same RGB triplet,
+// "48;2;" instead of "38;2;") — used by the half-block mascot renderer
+// below, where one glyph needs a foreground color for its top pixel and a
+// background color for its bottom pixel in the same cell.
+function bgEscape(colorName) {
+  return colors[colorName].replace('38;2;', '48;2;');
+}
+
 // The QueckSilver / Zora pixel mascot — same 11x9 grid used by
 // src/components/PixelMascot.tsx in the main app (shared mark across
 // Council + Code workspace), reproduced here as colored terminal blocks.
@@ -156,16 +164,38 @@ const MASCOT_GRID = [
   [0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0],
 ];
 
+// Renders the mascot at roughly half its previous on-screen height by
+// packing two grid rows into every terminal row with a half-block glyph:
+// "▀" paints its top half in the foreground color and its bottom half in
+// the background color, so a pair of grid rows (top pixel, bottom pixel)
+// becomes one real terminal row instead of two. Cells that are empty in
+// both source rows stay a plain space (fully transparent); cells empty in
+// only one of the two rows use "▀"/"▄" with no background set at all, so
+// the empty half shows the terminal's own background instead of a colored
+// block — same transparency the rest of the mascot already relies on.
 export function mascot({ bodyColor = 'steelBlue', eyeColor = 'eyeDark' } = {}) {
-  return MASCOT_GRID.map((row) =>
-    row
-      .map((cell) => {
-        if (cell === 0) return '  ';
-        if (cell === 2) return c('██', eyeColor);
-        return c('██', bodyColor);
-      })
-      .join('')
-  ).join('\n');
+  const colorOf = (cell) => (cell === 2 ? eyeColor : cell === 1 ? bodyColor : null);
+  const lines = [];
+  for (let r = 0; r < MASCOT_GRID.length; r += 2) {
+    const topRow = MASCOT_GRID[r];
+    const botRow = MASCOT_GRID[r + 1] ?? topRow.map(() => 0);
+    let line = '';
+    for (let col = 0; col < topRow.length; col++) {
+      const top = colorOf(topRow[col]);
+      const bot = colorOf(botRow[col]);
+      if (!top && !bot) {
+        line += '  ';
+      } else if (top && bot) {
+        line += `${colors[top]}${bgEscape(bot)}▀▀${RESET}`;
+      } else if (top) {
+        line += `${colors[top]}▀▀${RESET}`;
+      } else {
+        line += `${colors[bot]}▄▄${RESET}`;
+      }
+    }
+    lines.push(line);
+  }
+  return lines.join('\n');
 }
 
 // The mountain ridge itself is not procedurally generated — it's a real
