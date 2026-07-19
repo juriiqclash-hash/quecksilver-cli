@@ -542,7 +542,7 @@ export function enableSlashCommandHighlight(rl, promptColored, knownCommands) {
 // moment it's an exact match, and reverts to plain the instant it isn't.
 export function readBoxedInput({ width, statusText, knownCommands = [] } = {}) {
   return new Promise((resolve) => {
-    const w = width || terminalWidth();
+    let w = width || terminalWidth();
     const placeholder = 'Try "/commands" to see what you can do';
     const known = new Set(knownCommands.map((k) => k.toLowerCase()));
     let buf = '';
@@ -610,7 +610,25 @@ export function readBoxedInput({ width, statusText, knownCommands = [] } = {}) {
 
     const cleanup = () => {
       stdin.removeListener('keypress', onKeypress);
+      process.stdout.removeListener('resize', onResize);
       if (stdin.setRawMode) stdin.setRawMode(wasRaw ?? false);
+    };
+
+    // A live terminal resize invalidates all the row math above — the
+    // terminal itself may have reflowed already-printed lines, so "move up
+    // N rows" no longer lands where we think it does, and continuing to
+    // redraw at the old width just tears the box apart. Instead of trying
+    // to recover the old position, drop to a guaranteed-fresh line and
+    // redraw the box from scratch at the new width — this can't fix
+    // already-printed content further up the scrollback (a plain scrolling
+    // terminal app has no way to reflow that after the fact), but it stops
+    // the live input box itself from staying corrupted for the rest of the
+    // session.
+    const onResize = () => {
+      w = terminalWidth();
+      process.stdout.write('\n');
+      firstDraw = true;
+      draw();
     };
 
     const onKeypress = (str, key) => {
@@ -640,6 +658,7 @@ export function readBoxedInput({ width, statusText, knownCommands = [] } = {}) {
 
     draw();
     stdin.on('keypress', onKeypress);
+    process.stdout.on('resize', onResize);
   });
 }
 
