@@ -157,7 +157,6 @@ function printWelcomePanel({ email, isPro }) {
     '',
     ...centerBlock(mascot().split('\n'), leftContentWidth),
     '',
-    '',
     ...centerBlock([
       statRow('Model', c('Zora 6.1', 'steelBlue')),
       statRow('Plan', c(plan, 'steelBlue')),
