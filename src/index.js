@@ -712,27 +712,48 @@ async function oneOffForcedTool(forceTool, token, { files = [], output, json, op
   }
 }
 
-async function interactiveChat(token, { files = [], open, initialHistory = [], usedLines = 0 } = {}) {
+async function interactiveChat(token, { files = [], open, initialHistory = [], usedLines = 0, account = null } = {}) {
   let lines = usedLines;
-  console.log(c('Type your message and press Enter to chat. Type "exit" to quit, or /commands to see everything else you can do.', 'gray'));
-  console.log();
-  lines += 2;
 
-  // Only worth showing if there's genuine room to spare — on a short
-  // terminal this would just eat into the space padToBottom needs to push
-  // the prompt down, which matters more than the about blurb does.
-  const aboutCost = aboutSectionLineCount();
-  if (process.stdout.isTTY && (process.stdout.rows || 24) - lines - aboutCost - 4 > 0) {
-    lines += printAboutSection();
-  }
+  // Everything printed before the person's first real message (the welcome
+  // panel/logo above, the "Type your message..." hint, the about blurb) is
+  // static — it's drawn once and never touched again. A terminal zoom
+  // changes column/row count exactly like a window resize does, but
+  // nothing was redrawing this header on that event, so the terminal's own
+  // reflow of that already-printed text corrupted the logo and clipped the
+  // quick-tips column. `redrawHeader` reprints this whole block fresh at
+  // the new size; it's wired up below and switched off the moment the
+  // first real input arrives, since after that this text is genuine chat
+  // history that shouldn't be wiped and replaced by a fresh header.
+  let headerActive = true;
+  const printIntro = () => {
+    console.log(c('Type your message and press Enter to chat. Type "exit" to quit, or /commands to see everything else you can do.', 'gray'));
+    console.log();
+    let n = 2;
+    const aboutCost = aboutSectionLineCount();
+    if (process.stdout.isTTY && (process.stdout.rows || 24) - n - aboutCost - 4 > 0) {
+      n += printAboutSection();
+    }
+    if (initialHistory.length > 0) {
+      console.log(c(`Resumed previous session (${initialHistory.length / 2} turn(s)).`, 'gray'));
+      console.log();
+      n += 2;
+    }
+    return n;
+  };
+  const resizeCoordinator = { justRedrew: false };
+  const redrawHeader = () => {
+    if (!headerActive) return;
+    lines = account ? printWelcomePanel(account) : 0;
+    lines += printIntro();
+    padToBottom(lines, { reserve: 4 });
+    resizeCoordinator.justRedrew = true;
+  };
+  if (account) process.stdout.on('resize', redrawHeader);
 
   const STATUS_TEXT = 'QueckSilver CLI • Powered by Zora';
   const history = [...initialHistory];
-  if (initialHistory.length > 0) {
-    console.log(c(`Resumed previous session (${initialHistory.length / 2} turn(s)).`, 'gray'));
-    console.log();
-    lines += 2;
-  }
+  lines += printIntro();
   let pendingFiles = files;
   let pendingOutput = null;
   let sessionOpen = open ?? getSetting('autoOpen');
@@ -764,7 +785,7 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], u
   // Draws the input as a real box — rule, typed text, rule, status line —
   // and resolves with whatever was typed. See readBoxedInput() in ui.js for
   // why this replaced the old readline-based prompt.
-  const promptNext = () => readBoxedInput({ width: chatWidth, statusText: STATUS_TEXT, knownCommands: KNOWN_SLASH_COMMANDS });
+  const promptNext = () => readBoxedInput({ width: chatWidth, statusText: STATUS_TEXT, knownCommands: KNOWN_SLASH_COMMANDS, resizeCoordinator });
 
   // readBoxedInput always draws exactly 4 rows (rule, input, rule, status)
   // — reserve that many so the box's own bottom rule lands flush against
@@ -776,6 +797,10 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], u
     const line = await promptNext();
     const text = line.trim();
     if (!text) continue;
+    if (headerActive) {
+      headerActive = false;
+      process.stdout.removeListener('resize', redrawHeader);
+    }
     if (text === 'exit' || text === 'quit') break;
 
     const fileCmd = text.match(/^\/(?:file|attach)\s+(.+)$/i);
@@ -879,8 +904,9 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], u
 // either a forced-tool call, a one-off answer, or the interactive chat loop.
 async function startSession(token, options) {
   let usedLines = 0;
+  let account = null;
   if (!options.json) {
-    const [account] = await Promise.all([
+    [account] = await Promise.all([
       fetchAccountInfo(token),
       getSetting('checkUpdates') ? checkForUpdate() : Promise.resolve(),
     ]);
@@ -927,7 +953,7 @@ async function startSession(token, options) {
       files, output: options.output, json: options.json, open: options.open, history: continuedHistory,
     });
   } else {
-    await interactiveChat(token, { files, open: options.open, initialHistory: continuedHistory, usedLines });
+    await interactiveChat(token, { files, open: options.open, initialHistory: continuedHistory, usedLines, account });
   }
 }
 
