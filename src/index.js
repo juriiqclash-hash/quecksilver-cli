@@ -8,7 +8,7 @@ import {
 } from './config.js';
 import { runLoginFlow } from './auth.js';
 import {
-  c, box, mascot, centerBlock, mountainScene, sideBySide, divider,
+  c, box, mascot, mountainScene, sideBySide, divider, terminalWidth, clearScreen,
   startThinkingSpinner, openPath, enableSlashCommandHighlight,
 } from './ui.js';
 
@@ -19,7 +19,6 @@ const SUPABASE_URL = 'https://pwdncixmwxedfhtiwpmt.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB3ZG5jaXhtd3hlZGZodGl3cG10Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUyNjE1NTIsImV4cCI6MjA5MDgzNzU1Mn0.z4qrH2YuBkVv9CbAOFNdbXD0wwAF8y-zCR584un_y9o';
 const ENDPOINT = `${SUPABASE_URL}/functions/v1/cli-chat`;
 const VERSION = pkg.version;
-const BANNER_WIDTH = 46;
 
 // Every slash command recognized inside interactiveChat's rl.on('line', ...)
 // handler below — kept in one place so the live input-highlighting knows
@@ -82,43 +81,72 @@ async function fetchAccountInfo(token) {
   return { email, isPro };
 }
 
-// The logged-out splash: title, a centered dot, the version, and the
-// mountain-and-mascot motif — shown before we know whether to start a
-// session or point the user at `quecksilver login`.
+// The logged-out splash: title and version on one edge-aligned line, then
+// the mountain-and-mascot motif stretched across the terminal — shown
+// before we know whether to start a session or point the user at
+// `quecksilver login`. Clears the screen first so it lands flush against
+// the top of the window, the same way Claude Code's own splash does.
 function printWelcomeBanner() {
+  clearScreen();
+  const width = terminalWidth({ min: 60, max: 96 });
   console.log();
-  console.log(centerBlock(c('Welcome to QueckSilver AI', 'steelBlue'), BANNER_WIDTH));
-  console.log(centerBlock(c('·', 'gray'), BANNER_WIDTH));
-  console.log(centerBlock(c(`v${VERSION}`, 'gray'), BANNER_WIDTH));
+  console.log(c('Welcome to QueckSilver AI', 'steelBlue') + c('  ·  ', 'gray') + c(`v${VERSION}`, 'gray'));
   console.log();
-  console.log(centerBlock(mountainScene(40).join('\n'), BANNER_WIDTH));
+  console.log(mountainScene(width).join('\n'));
   console.log();
 }
 
-// The logged-in welcome panel: a stats box (mascot, greeting, model, plan,
-// email, version, working directory) on the left, the mountain motif again
-// on the right — shown once per session start instead of the splash above.
+// Keeps a long path from blowing out the stats box: shows the tail (the
+// most useful part — the current folder) with a leading "…" once it no
+// longer fits the given budget.
+function fitPath(path, maxLen) {
+  if (path.length <= maxLen) return path;
+  return '…' + path.slice(path.length - (maxLen - 1));
+}
+
+// The logged-in welcome panel: a wide, short stats box (mascot, greeting,
+// model/plan/version and email/dir on two combined lines) on the left, the
+// mountain motif filling the rest of the terminal's width on the right —
+// shown once per session start instead of the splash above. Left width is
+// derived from the (fixed-ish) stat text itself rather than guessed as a
+// percentage of the terminal, so it can never grow past its slot and steal
+// space back from the motif on narrow terminals.
 function printWelcomePanel({ email, isPro }) {
-  const plan = isPro ? 'QueckSilver Pro' : 'QueckSilver Free';
+  clearScreen();
+  const plan = isPro ? 'Pro' : 'Free';
   const rawName = email.split('@')[0] || 'there';
   const name = rawName.charAt(0).toUpperCase() + rawName.slice(1);
 
+  const total = terminalWidth({ min: 80, max: 140 });
+  const gap = 3;
+  const statLine1Plain = `Model: Zora 6.1 · Plan: ${plan} · Version: v${VERSION}`;
+  // The box is sized to exactly fit statLine1 (its longest fixed-length
+  // line) — never wider than that unless the terminal has generous room to
+  // spare, and never narrower, so box() can't silently grow past what this
+  // math accounted for and steal space back from the motif.
+  const minLeftForContent = statLine1Plain.length + 4;
+  const leftWidth = Math.max(minLeftForContent, Math.min(60, total - gap - 22));
+  const rightWidth = Math.max(22, total - leftWidth - gap);
+  const contentWidth = leftWidth - 4;
+
+  const dirPrefix = `Email: ${email} · Dir: `;
+  const dirDisplay = fitPath(process.cwd(), Math.max(8, contentWidth - dirPrefix.length));
+
   const leftLines = [
+    '', // breathing room between the "QueckSilver CLI" title and the mascot
     ...mascot().split('\n'),
     '',
     c(`Welcome back, ${name}!`, 'bold'),
-    '',
-    c('Model:   ', 'gray') + c('Zora 6.1', 'steelBlue'),
-    c('Plan:    ', 'gray') + c(plan, 'steelBlue'),
-    c('Email:   ', 'gray') + email,
-    c('Version: ', 'gray') + `v${VERSION}`,
-    c('Dir:     ', 'gray') + process.cwd(),
+    c('Model: ', 'gray') + c('Zora 6.1', 'steelBlue') + c(' · ', 'gray')
+      + c('Plan: ', 'gray') + c(plan, 'steelBlue') + c(' · ', 'gray')
+      + c('Version: ', 'gray') + `v${VERSION}`,
+    c('Email: ', 'gray') + email + c(' · ', 'gray') + c('Dir: ', 'gray') + dirDisplay,
   ];
 
-  const leftBox = box(leftLines, { color: 'steelBlue', minWidth: 34, title: 'QueckSilver CLI' });
-  const rightMotif = mountainScene(34).join('\n');
+  const leftBox = box(leftLines, { color: 'steelBlue', minWidth: contentWidth, title: 'QueckSilver CLI' });
+  const rightMotif = mountainScene(rightWidth).join('\n');
 
-  console.log(sideBySide(leftBox, rightMotif, 3));
+  console.log(sideBySide(leftBox, rightMotif, gap));
   console.log();
 }
 
@@ -608,8 +636,10 @@ async function interactiveChat(token, { files = [], open, initialHistory = [] } 
     saveLastSession(history);
   };
 
-  // Frames the input line with a horizontal rule above it, so each turn's
-  // reply/thinking status sits above a clearly separated "input box".
+  // Frames the input with a horizontal rule above it (drawn here, right
+  // before the prompt appears) and another below it (drawn the moment the
+  // line is submitted, closing off what was just typed) — a real boxed
+  // input line in an otherwise append-only terminal.
   const promptNext = () => {
     console.log(divider());
     rl.prompt();
@@ -618,6 +648,7 @@ async function interactiveChat(token, { files = [], open, initialHistory = [] } 
   promptNext();
 
   rl.on('line', async (line) => {
+    console.log(divider());
     const text = line.trim();
     if (!text) { promptNext(); return; }
     if (text === 'exit' || text === 'quit') { rl.close(); return; }

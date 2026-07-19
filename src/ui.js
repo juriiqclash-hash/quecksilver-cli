@@ -25,6 +25,16 @@ export const colors = {
   steelBlue: `${ESC}38;2;89;166;192m`,
   // --zora-eye: hsl(216 8% 12%) → rgb(28,30,33), the mascot's eye color.
   eyeDark: `${ESC}38;2;28;30;33m`,
+  // Mountain-range palette — three ridges at increasing "distance", each
+  // with a slightly lighter rim tone along its silhouette edge for a soft
+  // rim-light effect. Cooler and lighter the farther back, mimicking
+  // atmospheric haze; darkest and most saturated up close.
+  mtFar: `${ESC}38;2;98;109;122m`,
+  mtFarRim: `${ESC}38;2;134;145;158m`,
+  mtMid: `${ESC}38;2;69;79;91m`,
+  mtMidRim: `${ESC}38;2;95;106;119m`,
+  mtNear: `${ESC}38;2;42;49;58m`,
+  mtNearRim: `${ESC}38;2;61;69;80m`,
 };
 
 export function c(text, color) {
@@ -82,18 +92,28 @@ export function sideBySide(leftBlock, rightBlock, gap = 2) {
   return rows.join('\n');
 }
 
-// A full-width horizontal rule, framing the chat input like a text box —
-// printed right above the readline prompt on every turn.
-export function divider(width) {
-  const w = width || process.stdout.columns || 60;
-  return c('─'.repeat(Math.max(10, w)), 'dim');
+// The real terminal width, clamped to a sane range so the layout never
+// goes absurdly narrow (piped/unknown width) or absurdly wide (huge
+// monitor) — used to size every full-width screen the same way.
+export function terminalWidth({ min = 60, max = 120, fallback = 80 } = {}) {
+  const cols = process.stdout.columns || fallback;
+  return Math.max(min, Math.min(max, cols));
 }
 
-export function centerLine(text, width) {
-  const len = visibleLength(text);
-  if (len >= width) return text;
-  const leftPad = Math.floor((width - len) / 2);
-  return ' '.repeat(leftPad) + text;
+// Clears the terminal (screen + scrollback) and homes the cursor, so a
+// fresh `quecksilver` run starts flush against the top of the window
+// instead of trailing after old shell scrollback — same feel as Claude
+// Code's own startup screen. No-ops when stdout isn't a real TTY.
+export function clearScreen() {
+  if (!process.stdout.isTTY) return;
+  process.stdout.write('\x1b[2J\x1b[3J\x1b[H');
+}
+
+// A full-width horizontal rule, framing the chat input like a text box —
+// printed both above and below the readline prompt on every turn.
+export function divider(width) {
+  const w = width || terminalWidth();
+  return c('─'.repeat(Math.max(10, w)), 'dim');
 }
 
 // The QueckSilver / Zora pixel mascot — same 11x9 grid used by
@@ -124,70 +144,112 @@ export function mascot({ bodyColor = 'steelBlue', eyeColor = 'eyeDark' } = {}) {
   ).join('\n');
 }
 
-// A mountain-landscape backdrop for the mascot — two snow-capped peaks over
-// a scattering of stars, framed top and bottom by a dotted horizon line,
-// with the Zora mascot standing in front at the left. Rows come back
-// pre-colored and padded to `width` visible columns, so the block can be
-// dropped straight into a centered banner or the right-hand column of the
-// logged-in welcome panel.
-export function mountainScene(width = 44) {
-  const w = Math.max(26, width);
-  const skyRows = 5;
-  const mascotRows = MASCOT_GRID.length;
-  const grid = Array.from({ length: skyRows + mascotRows }, () => Array(w).fill(' '));
-  const paint = Array.from({ length: skyRows + mascotRows }, () => Array(w).fill(null));
-
-  const stamp = (row, startCol, text, color) => {
-    for (let i = 0; i < text.length; i++) {
-      const col = startCol + i;
-      if (col < 0 || col >= w) continue;
-      grid[row][col] = text[i];
-      paint[row][col] = color;
-    }
-  };
-  const centered = (center, width2) => Math.round(center - width2 / 2);
-
-  // Two peaks, tapering from a light "snow cap" at the apex down to a dark
-  // base, merging into one ridge by the last mountain row.
-  const peakCenters = [Math.round(w * 0.26), Math.round(w * 0.68)];
-  peakCenters.forEach((cx) => stamp(0, centered(cx, 3), '░░░', 'gray'));
-  peakCenters.forEach((cx) => stamp(1, centered(cx, 7), '▓▓▓▓▓▓▓', 'gray'));
-  peakCenters.forEach((cx) => stamp(2, centered(cx, 13), '▓▓▓▓▓▓▓▓▓▓▓▓▓', 'gray'));
-  const baseWidth = Math.min(w - 4, 40);
-  stamp(3, centered(w / 2, baseWidth), '▓'.repeat(baseWidth), 'gray');
-  stamp(4, centered(w / 2, Math.max(0, baseWidth - 6)), '░'.repeat(Math.max(0, baseWidth - 6)), 'dim');
-
-  // Scattered stars, skipping any cell a mountain already claimed.
-  const starSpots = [[0, 2], [0, w - 4], [1, w - 6], [2, 2], [5, w - 5], [7, w - 8]];
-  starSpots.forEach(([row, col]) => {
-    if (row < grid.length && col >= 0 && col < w && grid[row][col] === ' ') {
-      grid[row][col] = '*';
-      paint[row][col] = 'dim';
-    }
-  });
-
-  // The mascot, standing on the horizon at the left.
-  MASCOT_GRID.forEach((row, ri) => {
-    row.forEach((cell, ci) => {
-      if (cell === 0) return;
-      const col = 2 + ci * 2;
-      const color = cell === 2 ? 'eyeDark' : 'steelBlue';
-      stamp(skyRows + ri, col, '██', color);
-    });
-  });
-
-  const lines = grid.map((row, r) =>
-    row.map((ch, ci) => (ch === ' ' ? ' ' : c(ch, paint[r][ci] || 'gray'))).join('')
-  );
-  const border = c('.'.repeat(w), 'dim');
-  return [border, ...lines, border];
+// A single period of a sharp-cornered triangle wave in [-1, 1] — unlike a
+// sine, this has real angular peaks and valleys, which is what makes the
+// stacked-octave sum below read as jagged rock instead of rolling hills.
+function triangleWave(t) {
+  const x = ((t % 1) + 1) % 1;
+  return x < 0.5 ? 4 * x - 1 : 3 - 4 * x;
 }
 
-export function centerBlock(block, width) {
-  return block
-    .split('\n')
-    .map((line) => centerLine(line, width))
-    .join('\n');
+// A jagged ridge silhouette built from a few octaves of triangle waves —
+// each pass roughly doubles the frequency and halves the amplitude (a small
+// fractal/fBm sum), which is what gives a real mountain skyline its mix of
+// a few big peaks with smaller, rockier detail riding on their slopes.
+function ridgeHeights(width, { base, amp, freq, phase, octaves = 3 }) {
+  const heights = [];
+  for (let x = 0; x < width; x++) {
+    const t = x / width;
+    let h = base;
+    let a = amp;
+    let f = freq;
+    for (let o = 0; o < octaves; o++) {
+      h += a * triangleWave(t * f + phase + o * 0.37);
+      a *= 0.5;
+      f *= 2.15;
+    }
+    heights.push(h);
+  }
+  return heights;
+}
+
+// A mountain-landscape backdrop for the mascot: three overlapping ridgelines
+// receding into the distance (lightest/hazy far range down to a dark near
+// range), scattered stars in the open sky, framed top and bottom by a
+// dotted horizon line, with the Zora mascot standing on the near ridge at
+// the left. Rows come back pre-colored and padded to `width` visible
+// columns, ready to drop into a full-width splash or a welcome-panel column.
+export function mountainScene(width = 60, { skyRows = 9 } = {}) {
+  const w = Math.max(22, width);
+  const mascotRows = MASCOT_GRID.length;
+
+  // Farthest ridge: tallest, lightest, broadest peaks. Nearest ridge:
+  // shortest, darkest, busiest detail, and forms the ground line the
+  // mascot stands on. Deliberately mismatched frequencies/phases so the
+  // three skylines never line up — that's what reads as "alternating"
+  // ranges receding into the distance rather than one repeated shape.
+  const ridges = [
+    {
+      heights: ridgeHeights(w, { base: skyRows * 0.62, amp: skyRows * 0.30, freq: 1.3, phase: 0.15 }),
+      body: 'mtFar', rim: 'mtFarRim',
+    },
+    {
+      heights: ridgeHeights(w, { base: skyRows * 0.44, amp: skyRows * 0.26, freq: 2.1, phase: 1.85 }),
+      body: 'mtMid', rim: 'mtMidRim',
+    },
+    {
+      heights: ridgeHeights(w, { base: skyRows * 0.26, amp: skyRows * 0.22, freq: 3.0, phase: 3.4 }),
+      body: 'mtNear', rim: 'mtNearRim',
+    },
+  ];
+
+  // Paint back-to-front so nearer ridges overwrite farther ones wherever
+  // they overlap — that overwrite order is what creates the depth effect.
+  const cell = Array.from({ length: skyRows }, () => Array(w).fill(null));
+  ridges.forEach(({ heights, body, rim }) => {
+    for (let x = 0; x < w; x++) {
+      const h = Math.max(1, Math.min(skyRows, Math.round(heights[x])));
+      const top = skyRows - h;
+      for (let y = top; y < skyRows; y++) cell[y][x] = y === top ? rim : body;
+    }
+  });
+
+  // A handful of stars in whatever open sky is left, weighted toward the
+  // upper rows where the ridges never reach.
+  const starCols = [0.05, 0.22, 0.5, 0.7, 0.88, 0.96];
+  starCols.forEach((frac, i) => {
+    const row = i % 3;
+    const col = Math.round(frac * (w - 1));
+    if (!cell[row][col]) cell[row][col] = 'star';
+  });
+
+  const skyLines = cell.map((row) =>
+    row.map((color) => {
+      if (!color) return ' ';
+      if (color === 'star') return c('*', 'dim');
+      return c('█', color);
+    }).join('')
+  );
+
+  // The mascot, standing on the near ridge's ground line at the left.
+  const mascotChars = Array.from({ length: mascotRows }, () => Array(w).fill(' '));
+  const mascotPaint = Array.from({ length: mascotRows }, () => Array(w).fill(null));
+  MASCOT_GRID.forEach((row, ri) => {
+    row.forEach((cellValue, ci) => {
+      if (cellValue === 0) return;
+      const col = 2 + ci * 2;
+      const color = cellValue === 2 ? 'eyeDark' : 'steelBlue';
+      for (const dc of [0, 1]) {
+        if (col + dc < w) { mascotChars[ri][col + dc] = '█'; mascotPaint[ri][col + dc] = color; }
+      }
+    });
+  });
+  const mascotLines = mascotChars.map((row, r) =>
+    row.map((ch, ci) => (ch === ' ' ? ' ' : c(ch, mascotPaint[r][ci]))).join('')
+  );
+
+  const border = c('.'.repeat(w), 'dim');
+  return [border, ...skyLines, ...mascotLines, border];
 }
 
 // A grab-bag of playful "thinking" verbs, shown at random while waiting on
