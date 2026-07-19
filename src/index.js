@@ -124,25 +124,32 @@ function printWelcomePanel({ email, isPro }) {
   // padding*2 + divider + right padding*2 + right border = 1+2+1+2+1.
   const structureOverhead = 7;
   const rightMinContent = 22;
-  const statLine1Plain = `Model: Zora 6.1 · Plan: ${plan} · Version: v${VERSION}`;
+
+  // One stat per line with aligned labels ("Model:   ", "Version: ", ...)
+  // reads far better than cramming everything onto two dot-separated
+  // lines — the box's height is already set by the (much taller) mountain
+  // column next to it, so there's no vertical-space reason to cram.
+  const labelWidth = Math.max('Model'.length, 'Plan'.length, 'Version'.length, 'Email'.length, 'Dir'.length) + 2;
+  const minValueWidth = 30;
   const leftContentWidth = Math.max(
-    statLine1Plain.length,
+    labelWidth + minValueWidth,
     Math.min(56, total - structureOverhead - rightMinContent),
   );
   const rightContentWidth = total - structureOverhead - leftContentWidth;
 
-  const dirPrefix = `Email: ${email} · Dir: `;
-  const dirDisplay = fitPath(process.cwd(), Math.max(8, leftContentWidth - dirPrefix.length));
+  const dirDisplay = fitPath(process.cwd(), Math.max(8, leftContentWidth - labelWidth));
+  const statRow = (label, value) => c(`${label}:`.padEnd(labelWidth), 'gray') + value;
 
   const leftLines = [
     '', // breathing room between the "QueckSilver CLI" title and the mascot
     ...mascot().split('\n'),
     '',
     c(`Welcome back, ${name}!`, 'bold'),
-    c('Model: ', 'gray') + c('Zora 6.1', 'steelBlue') + c(' · ', 'gray')
-      + c('Plan: ', 'gray') + c(plan, 'steelBlue') + c(' · ', 'gray')
-      + c('Version: ', 'gray') + `v${VERSION}`,
-    c('Email: ', 'gray') + email + c(' · ', 'gray') + c('Dir: ', 'gray') + dirDisplay,
+    statRow('Model', c('Zora 6.1', 'steelBlue')),
+    statRow('Plan', c(plan, 'steelBlue')),
+    statRow('Version', `v${VERSION}`),
+    statRow('Email', email),
+    statRow('Dir', dirDisplay),
   ];
   const rightLines = mountainScene(rightContentWidth, { border: false });
 
