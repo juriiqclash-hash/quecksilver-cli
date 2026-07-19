@@ -130,7 +130,7 @@ function printWelcomePanel({ email, isPro }) {
   // and centering the whole block (not each line individually) keeps the
   // labels lined up with each other instead of each drifting to its own
   // center.
-  const labelWidth = Math.max('Model'.length, 'Plan'.length, 'Version'.length, 'Email'.length, 'Dir'.length) + 2;
+  const labelWidth = Math.max('Model'.length, 'Plan'.length, 'Version'.length, 'Email'.length, 'Dir'.length) + 3;
   const minValueWidth = 30;
   const mascotWidth = Math.max(...mascot().split('\n').map(visibleLength));
   const leftMinWidth = Math.max(labelWidth + minValueWidth, mascotWidth);
@@ -160,13 +160,9 @@ function printWelcomePanel({ email, isPro }) {
     '',
     ...centerBlock([
       statRow('Model', c('Zora 6.1', 'steelBlue')),
-      '',
       statRow('Plan', c(plan, 'steelBlue')),
-      '',
       statRow('Version', `v${VERSION}`),
-      '',
       statRow('Email', email),
-      '',
       statRow('Dir', dirDisplay),
     ], leftContentWidth),
   ];
