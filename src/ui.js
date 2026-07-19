@@ -27,11 +27,11 @@ export const colors = {
   eyeDark: `${ESC}38;2;28;30;33m`,
   // Mountain-range palette — three ridges at increasing "distance", cooler
   // and lighter the farther back (atmospheric haze), darkest up close. Each
-  // ridge's own light/dark shading comes from shadeChar's ░▒▓█ grain, not
-  // a second color, so one tone per ridge is enough.
-  mtFar: `${ESC}38;2;98;109;122m`,
-  mtMid: `${ESC}38;2;69;79;91m`,
-  mtNear: `${ESC}38;2;42;49;58m`,
+  // ridge also gets its own ░▒▓█ light-to-dark grain from peak-tip to base
+  // (moonlit edge fading into shadow), layered on top of this base hue.
+  mtFar: `${ESC}38;2;150;158;168m`,
+  mtMid: `${ESC}38;2;92;101;112m`,
+  mtNear: `${ESC}38;2;46;52;60m`,
 };
 
 export function c(text, color) {
@@ -196,34 +196,53 @@ function ridgeHeights(width, { base, amp, freq, phase, octaves = 3 }) {
 // range), scattered stars in the open sky, framed top and bottom by a
 // dotted horizon line (unless `border: false`, for when it's embedded as a
 // column inside a bordered box that already draws its own edges), with the
-// Zora mascot standing on the near ridge at the left. Rows come back
+// Zora mascot standing on the near ridge at the left. Terrain is generated
+// across the *entire* canvas height (sky rows + mascot rows combined), not
+// just the sky band — every column's nearest ridge always reaches the very
+// bottom row (min height is clamped to 1), so the range runs unbroken all
+// the way down to the ground the mascot stands on, with no black gap
+// between the mountain's foot and the mascot's row. Rows come back
 // pre-colored and padded to `width` visible columns, ready to drop into a
 // full-width splash or a welcome-panel column.
 export function mountainScene(width = 60, { skyRows = 9, border = true } = {}) {
   const w = Math.max(22, width);
   const mascotRows = MASCOT_GRID.length;
+  const rows = skyRows + mascotRows; // full canvas height, sky + ground
 
-  // Farthest ridge: tallest, lightest, broadest peaks. Nearest ridge:
-  // shortest, darkest, busiest detail, and forms the ground line the
-  // mascot stands on. Deliberately mismatched frequencies/phases so the
-  // three skylines never line up — that's what reads as "alternating"
-  // ranges receding into the distance rather than one repeated shape.
+  // Farthest ridge: tallest, lightest, broadest peaks, reaching well up
+  // into the sky band. Nearest ridge: shortest overall but darkest, and —
+  // because every ridge's minimum height is clamped to 1 row — it always
+  // touches the bottom row in every column, forming the unbroken ground
+  // line the mascot stands on. Deliberately mismatched frequencies/phases
+  // so the three skylines never line up — that's what reads as ranges
+  // overlapping and receding into the distance rather than one repeated
+  // shape (matches the reference: a tall jagged spine of peaks with a
+  // smaller secondary hump peeking through the gaps, and a darker
+  // foreground shoulder running along the base).
   const ridges = [
-    { heights: ridgeHeights(w, { base: skyRows * 0.62, amp: skyRows * 0.30, freq: 1.3, phase: 0.15 }), color: 'mtFar', ch: '░' },
-    { heights: ridgeHeights(w, { base: skyRows * 0.44, amp: skyRows * 0.26, freq: 2.1, phase: 1.85 }), color: 'mtMid', ch: '▒' },
-    { heights: ridgeHeights(w, { base: skyRows * 0.26, amp: skyRows * 0.22, freq: 3.0, phase: 3.4 }), color: 'mtNear', ch: '▓' },
+    { heights: ridgeHeights(w, { base: rows * 0.58, amp: rows * 0.24, freq: 1.05, phase: 0.15, octaves: 2 }), color: 'mtFar' },
+    { heights: ridgeHeights(w, { base: rows * 0.40, amp: rows * 0.16, freq: 1.9, phase: 2.1, octaves: 2 }), color: 'mtMid' },
+    { heights: ridgeHeights(w, { base: rows * 0.30, amp: rows * 0.22, freq: 1.55, phase: 3.55, octaves: 2 }), color: 'mtNear' },
   ];
 
   // Paint back-to-front so nearer ridges overwrite farther ones wherever
   // they overlap — that overwrite order is what creates the depth effect.
-  // Each ridge is one flat shade character, sparser the farther back —
-  // depth here comes from color + dot-density both shifting together.
-  const cell = Array.from({ length: skyRows }, () => Array(w).fill(null));
-  ridges.forEach(({ heights, color, ch }) => {
+  const cell = Array.from({ length: rows }, () => Array(w).fill(null));
+  ridges.forEach(({ heights, color }) => {
     for (let x = 0; x < w; x++) {
-      const h = Math.max(1, Math.min(skyRows, Math.round(heights[x])));
-      const top = skyRows - h;
-      for (let y = top; y < skyRows; y++) cell[y][x] = { ch, color };
+      const h = Math.max(1, Math.min(rows, Math.round(heights[x])));
+      const top = rows - h;
+      for (let y = top; y < rows; y++) {
+        // Depth from *this ridge's own* peak tip at this column drives a
+        // fixed ░▒▓█ gradient — light near the tip, solid near the base —
+        // independent of the far/mid/near hue shift above. Deterministic,
+        // not per-cell random noise: same depth always maps to the same
+        // glyph, which is what keeps it reading as clean engraved shading
+        // instead of static.
+        const depth = h <= 1 ? 1 : (y - top) / (h - 1);
+        const ch = depth < 0.22 ? '░' : depth < 0.5 ? '▒' : depth < 0.78 ? '▓' : '█';
+        cell[y][x] = { ch, color };
+      }
     }
   });
 
@@ -236,28 +255,26 @@ export function mountainScene(width = 60, { skyRows = 9, border = true } = {}) {
     if (!cell[row][col]) cell[row][col] = { ch: '*', color: 'dim' };
   });
 
-  const skyLines = cell.map((row) =>
-    row.map((data) => (data ? c(data.ch, data.color) : ' ')).join('')
-  );
-
-  // The mascot, standing on the near ridge's ground line at the left.
-  const mascotChars = Array.from({ length: mascotRows }, () => Array(w).fill(' '));
-  const mascotPaint = Array.from({ length: mascotRows }, () => Array(w).fill(null));
+  // The mascot overlays the terrain on the bottom `mascotRows` rows, at
+  // the left — only its own non-empty cells replace what's underneath, so
+  // the mountain terrain stays visible behind/around it instead of a
+  // blank box.
+  const mascotTop = rows - mascotRows;
   MASCOT_GRID.forEach((row, ri) => {
     row.forEach((cellValue, ci) => {
       if (cellValue === 0) return;
       const col = 2 + ci * 2;
       const color = cellValue === 2 ? 'eyeDark' : 'steelBlue';
       for (const dc of [0, 1]) {
-        if (col + dc < w) { mascotChars[ri][col + dc] = '█'; mascotPaint[ri][col + dc] = color; }
+        if (col + dc < w) cell[mascotTop + ri][col + dc] = { ch: '█', color };
       }
     });
   });
-  const mascotLines = mascotChars.map((row, r) =>
-    row.map((ch, ci) => (ch === ' ' ? ' ' : c(ch, mascotPaint[r][ci]))).join('')
+
+  const lines = cell.map((row) =>
+    row.map((data) => (data ? c(data.ch, data.color) : ' ')).join('')
   );
 
-  const lines = [...skyLines, ...mascotLines];
   if (!border) return lines;
   const dots = c('.'.repeat(w), 'dim');
   return [dots, ...lines, dots];
