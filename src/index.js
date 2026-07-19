@@ -90,7 +90,7 @@ function printWelcomeBanner() {
   clearScreen();
   const width = terminalWidth({ min: 60, max: 110 });
   console.log();
-  console.log(centerBlock([c('Welcome to QueckSilver CLI', 'steelBlue') + c(' · ', 'gray') + c(`v${VERSION}`, 'gray')], width).join('\n'));
+  console.log(c('Welcome to QueckSilver CLI', 'steelBlue') + c(' · ', 'gray') + c(`v${VERSION}`, 'gray'));
   console.log();
   console.log(logoArt(width).join('\n'));
   console.log();
@@ -119,7 +119,7 @@ function printWelcomePanel({ email, isPro }) {
   const rawName = email.split('@')[0] || 'there';
   const name = rawName.charAt(0).toUpperCase() + rawName.slice(1);
 
-  const total = terminalWidth({ min: 80, max: 140 });
+  const total = terminalWidth({ min: 80, max: 110 });
   // Non-content characters twoColumnBox always draws: left border + left
   // padding*2 + divider + right padding*2 + right border = 1+2+1+2+1.
   const structureOverhead = 7;
@@ -133,17 +133,19 @@ function printWelcomePanel({ email, isPro }) {
   const minValueWidth = 30;
   const mascotWidth = Math.max(...mascot().split('\n').map(visibleLength));
   const leftMinWidth = Math.max(labelWidth + minValueWidth, mascotWidth);
-  const rightMinWidth = QUICK_TIPS_COL_WIDTH + 4; // command column + quickTipsLines' own forced-minimum description length
 
-  // leftContentWidth + rightContentWidth + structureOverhead always equals
-  // `total` exactly — no independent "natural width" on either side that
-  // could add up to more than the terminal actually has. Quick-tip text is
-  // fixed content (unlike the old mountain motif, generated at exactly the
-  // width asked for), so quickTipsLines() truncates its own descriptions
-  // to whatever rightContentWidth turns out to be, rather than assuming
-  // they already fit.
-  const leftContentWidth = Math.max(leftMinWidth, Math.min(50, total - structureOverhead - rightMinWidth));
-  const rightContentWidth = total - structureOverhead - leftContentWidth;
+  // The right column only ever takes the width its own text actually needs
+  // (clamped to whatever's left after the left column's minimum) — giving
+  // it all the remaining terminal width instead just left a big empty
+  // gutter next to short lines on a wide terminal. The left column then
+  // absorbs whatever's left over, which centerBlock turns into balanced
+  // padding around the greeting/mascot/stats instead of a cramped corner.
+  const availableForBoth = total - structureOverhead;
+  const rightContentWidth = Math.max(
+    Math.min(QUICK_TIPS_NATURAL_WIDTH, availableForBoth - leftMinWidth),
+    QUICK_TIPS_COL_WIDTH + 4, // still leave room for a few description characters on a narrow terminal
+  );
+  const leftContentWidth = availableForBoth - rightContentWidth;
   const rightLines = quickTipsLines(rightContentWidth);
 
   const dirDisplay = fitPath(process.cwd(), Math.max(8, leftContentWidth - labelWidth));
@@ -388,6 +390,15 @@ const QUICK_TIPS = [
 // size the right column wide enough to fit at least a few description
 // characters (see rightMinWidth there), not just the commands themselves.
 const QUICK_TIPS_COL_WIDTH = Math.max(...QUICK_TIPS.map(([cmd]) => cmd.length)) + 2;
+
+// The right column's actual content width with nothing truncated — used to
+// size the panel's right column to what the tips need, rather than letting
+// it stretch to fill whatever space is left over on a wide terminal (which
+// just reads as a big empty gutter next to short lines).
+const QUICK_TIPS_NATURAL_WIDTH = Math.max(
+  'Quick tips:'.length,
+  ...QUICK_TIPS.map(([cmd, desc]) => QUICK_TIPS_COL_WIDTH + desc.length),
+);
 
 // Formats the quick-tips block as plain lines (not printed directly) so it
 // can be dropped straight into the welcome panel's right column. Truncates
