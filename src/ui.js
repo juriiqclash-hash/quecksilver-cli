@@ -582,14 +582,23 @@ export function readBoxedInput({ width, statusText, knownCommands = [] } = {}) {
         readline.cursorTo(process.stdout, 0);
       }
       firstDraw = false;
-      for (const line of render()) {
+      // Newlines go *between* lines, not after the last one — a trailing
+      // newline after the status line asks the terminal for a row past the
+      // box's last one, which forces a scroll (shifting everything above
+      // it up by one line) whenever the box sits flush against the
+      // terminal's bottom edge. Every earlier redraw already left the
+      // cursor short of that trailing newline (see below), so omitting it
+      // here keeps redraws from ever needing to create a new row.
+      const renderedLines = render();
+      renderedLines.forEach((line, i) => {
         readline.clearLine(process.stdout, 0);
-        process.stdout.write(line + '\n');
-      }
-      // The loop just printed 4 lines and is now one row past the status
-      // line — move back up 3 to land on the input row, then park the
-      // cursor right after the typed text (row 2 of the 4 just drawn).
-      readline.moveCursor(process.stdout, 0, -3);
+        process.stdout.write(line);
+        if (i < renderedLines.length - 1) process.stdout.write('\n');
+      });
+      // Cursor is now at the end of the status line (row 3 of the 4 just
+      // drawn, no trailing newline) — move back up 2 to land on the input
+      // row, then park the cursor right after the typed text.
+      readline.moveCursor(process.stdout, 0, -2);
       readline.cursorTo(process.stdout, 2 + buf.length);
     };
 
