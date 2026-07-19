@@ -107,7 +107,17 @@ export function twoColumnBox(leftLines, rightLines, { color = 'steelBlue', paddi
 // monitor) — used to size every full-width screen the same way.
 export function terminalWidth({ min = 60, max = 120, fallback = 80 } = {}) {
   const cols = process.stdout.columns || fallback;
-  return Math.max(min, Math.min(max, cols));
+  // The returned width must never exceed the terminal's *real* current
+  // column count, even when that's narrower than `min` — every box/rule
+  // this powers assumes one logical line = one physical terminal row, and
+  // the moment a "line" is wider than the actual window, the terminal
+  // wraps it into two rows behind our back. That single extra row is
+  // enough to desync all the fixed-offset cursor math further down (in
+  // readBoxedInput especially), which is what produced the mangled
+  // layout when the window was narrowed below ~80 columns. Clamping the
+  // lower bound to `cols` (instead of always enforcing `min`) keeps the
+  // box intentionally narrower on a small window rather than wrapped.
+  return Math.max(Math.min(min, cols), Math.min(max, cols));
 }
 
 // Clears the terminal (screen + scrollback) and homes the cursor, so a
@@ -542,11 +552,21 @@ export function enableSlashCommandHighlight(rl, promptColored, knownCommands) {
 // moment it's an exact match, and reverts to plain the instant it isn't.
 export function readBoxedInput({ width, statusText, knownCommands = [] } = {}) {
   return new Promise((resolve) => {
-    const w = width || terminalWidth();
+    // `w` used to be frozen for the life of the box, so resizing the
+    // window (bigger or smaller) left it drawn at a stale width forever —
+    // it's mutable now so the resize handler below can update it live.
+    let w = width || terminalWidth();
     const placeholder = 'Try "/commands" to see what you can do';
     const known = new Set(knownCommands.map((k) => k.toLowerCase()));
     let buf = '';
     let firstDraw = true;
+    // Some terminals (Windows Terminal / conpty in particular) can feed a
+    // burst of extra input around a resize. As a safety net, a Return
+    // with an empty buffer arriving within this window after a resize is
+    // treated as resize noise rather than a real submit — a real person
+    // is very unlikely to press Enter on an empty box within a fraction
+    // of a second of dragging the window edge.
+    let suppressEmptyEnterUntil = 0;
 
     const highlightedBuf = () => {
       const match = buf.match(/^(\/\S*)([\s\S]*)$/);
@@ -610,6 +630,7 @@ export function readBoxedInput({ width, statusText, knownCommands = [] } = {}) {
 
     const cleanup = () => {
       stdin.removeListener('keypress', onKeypress);
+      process.stdout.removeListener('resize', onResize);
       if (stdin.setRawMode) stdin.setRawMode(wasRaw ?? false);
     };
 
@@ -621,6 +642,7 @@ export function readBoxedInput({ width, statusText, knownCommands = [] } = {}) {
         return;
       }
       if (key && (key.name === 'return' || key.name === 'enter')) {
+        if (!buf && Date.now() < suppressEmptyEnterUntil) return;
         cleanup();
         readline.moveCursor(process.stdout, 0, 3);
         readline.cursorTo(process.stdout, 0);
@@ -638,8 +660,24 @@ export function readBoxedInput({ width, statusText, knownCommands = [] } = {}) {
       }
     };
 
+    // The terminal has already reflowed whatever text was on screen the
+    // instant it resized — that part is outside this function's control.
+    // What *is* in our control is making sure the box itself recovers:
+    // pick up the new width, wipe anything left over from the old size
+    // (clearScreenDown, since we can't know how many rows the old box
+    // now occupies after reflow), and redraw clean at the new size.
+    const onResize = () => {
+      w = terminalWidth();
+      suppressEmptyEnterUntil = Date.now() + 300;
+      readline.cursorTo(process.stdout, 0);
+      readline.clearScreenDown(process.stdout);
+      firstDraw = true;
+      draw();
+    };
+
     draw();
     stdin.on('keypress', onKeypress);
+    process.stdout.on('resize', onResize);
   });
 }
 
