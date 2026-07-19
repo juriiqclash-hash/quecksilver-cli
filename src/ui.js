@@ -715,3 +715,25 @@ export function waitForKeypress() {
     });
   });
 }
+
+// Keeps the process alive for a short window purely so a static screen
+// (like the logged-out banner) has a chance to redraw itself if the
+// window is resized/zoomed right after it's printed — otherwise the
+// program has already exited by the time anyone could resize it, and
+// there's no running code left to react. Deliberately does NOT touch
+// stdin (unlike waitForKeypress): reading raw keystrokes here to let
+// someone skip the wait early would risk swallowing the first character
+// of whatever shell command they type next, once this process exits.
+export function waitBriefly({ ms = 2000, onResize } = {}) {
+  return new Promise((resolve) => {
+    if (!process.stdout.isTTY) {
+      resolve();
+      return;
+    }
+    if (onResize) process.stdout.on('resize', onResize);
+    setTimeout(() => {
+      if (onResize) process.stdout.removeListener('resize', onResize);
+      resolve();
+    }, ms);
+  });
+}
