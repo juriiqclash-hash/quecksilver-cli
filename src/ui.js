@@ -191,13 +191,27 @@ function rgbColor(rgb) {
 // Each is only drawn where the sampled terrain pixel underneath is dark
 // enough to read as sky, so a star never overpaints a bright mountain peak.
 const STAR_POSITIONS = [
-  [0.04, 0.05], [0.11, 0.2], [0.18, 0.05], [0.27, 0.28],
-  [0.35, 0.1], [0.44, 0.2], [0.52, 0.05], [0.6, 0.24],
-  [0.68, 0.1], [0.76, 0.3], [0.83, 0.05], [0.91, 0.2],
-  [0.14, 0.4], [0.58, 0.38], [0.8, 0.42], [0.3, 0.42],
+  [0.04, 0.05], [0.16, 0.22], [0.28, 0.06], [0.4, 0.28],
+  [0.52, 0.08], [0.64, 0.24], [0.76, 0.06], [0.88, 0.22],
+  [0.2, 0.4], [0.6, 0.4],
 ];
 const STAR_COLOR = [235, 235, 240];
-const STAR_DIM_COLOR = [150, 150, 158];
+const STAR_ARM_COLOR = [140, 140, 148];
+
+// Draws a small four-point sparkle (a "+" of one bright center cell and
+// four dimmer arm cells) instead of a single flat dot, so stars actually
+// read as stars rather than plain squares.
+function drawStar(pixels, w, rows, px, py) {
+  const [r, g, b] = pixels[py][px];
+  if (r >= 30 || g >= 30 || b >= 30) return;
+  pixels[py][px] = STAR_COLOR;
+  for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+    const nx = px + dx, ny = py + dy;
+    if (nx < 0 || nx >= w || ny < 0 || ny >= rows) continue;
+    const [nr, ng, nb] = pixels[ny][nx];
+    if (nr < 30 && ng < 30 && nb < 30) pixels[ny][nx] = STAR_ARM_COLOR;
+  }
+}
 
 // A mountain-landscape backdrop for the mascot: the ridge/sky shading comes
 // from the baked reference render (see mountainRGB above), while the
@@ -219,13 +233,10 @@ export function mountainScene(width = 60, { skyRows = 9, border = true } = {}) {
     Array.from({ length: w }, (_, px) => sampleBox(buf, px, py, w, rows))
   );
 
-  STAR_POSITIONS.forEach(([xFrac, yFrac], i) => {
+  STAR_POSITIONS.forEach(([xFrac, yFrac]) => {
     const px = Math.min(w - 1, Math.round(xFrac * (w - 1)));
     const py = Math.min(rows - 1, Math.round(yFrac * (rows - 1)));
-    const [r, g, b] = pixels[py][px];
-    if (r < 30 && g < 30 && b < 30) {
-      pixels[py][px] = i % 3 === 0 ? STAR_DIM_COLOR : STAR_COLOR;
-    }
+    drawStar(pixels, w, rows, px, py);
   });
 
   // The mascot overlays the terrain on the bottom `mascotRows` character
