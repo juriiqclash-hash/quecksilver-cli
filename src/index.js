@@ -10,6 +10,7 @@ import { runLoginFlow } from './auth.js';
 import {
   c, mascot, logoArt, twoColumnBox, terminalWidth, clearScreen,
   centerBlock, visibleLength, startThinkingSpinner, openPath, readBoxedInput,
+  padToBottom,
 } from './ui.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -159,9 +160,13 @@ function printWelcomePanel({ email, isPro }) {
     '',
     ...centerBlock([
       statRow('Model', c('Zora 6.1', 'steelBlue')),
+      '',
       statRow('Plan', c(plan, 'steelBlue')),
+      '',
       statRow('Version', `v${VERSION}`),
+      '',
       statRow('Email', email),
+      '',
       statRow('Dir', dirDisplay),
     ], leftContentWidth),
   ];
@@ -765,6 +770,12 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], u
   // and resolves with whatever was typed. See readBoxedInput() in ui.js for
   // why this replaced the old readline-based prompt.
   const promptNext = () => readBoxedInput({ width: chatWidth, statusText: STATUS_TEXT, knownCommands: KNOWN_SLASH_COMMANDS });
+
+  // readBoxedInput always draws exactly 4 rows (rule, input, rule, status)
+  // — reserve that many so the box's own bottom rule lands flush against
+  // the terminal's last row instead of floating right after whatever was
+  // printed above it.
+  padToBottom(lines, { reserve: 4 });
 
   while (true) {
     const line = await promptNext();
