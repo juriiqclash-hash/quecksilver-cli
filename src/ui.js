@@ -259,17 +259,34 @@ export function mountainScene(width = 60, { skyRows = 9, border = true } = {}) {
 
   // Only the cells whose sample box actually overlaps the source's blurry
   // baked-in mascot (see MASCOT_SOURCE_BOX) get touched — everything
-  // beside it, left or right, is real untouched mountain data. Each
-  // contaminated cell extends its own column's last clean row from just
-  // above the mascot band straight down, so the ridge visibly continues
-  // behind/around our own mascot instead of a flat blanked rectangle.
+  // beside it, left or right, is real untouched mountain data. At body
+  // height, a contaminated cell borrows its nearest *un*contaminated
+  // neighbor in the same row (the ridge's brightness at a given height
+  // varies smoothly across columns, so this follows its actual shape) —
+  // extending straight down from the row above failed here, since at the
+  // far-left columns the ridge simply hasn't risen yet that high up, so
+  // "the row above" was itself already pre-ridge black. At leg/ground
+  // height there's nothing to borrow — the mascot stands on flat ground,
+  // not on a floating patch of ridge — so those rows are forced black.
   const mascotTop = rows - mascotRows;
-  for (let x = 0; x < w; x++) {
-    let cleanRow = mascotTop - 1;
-    while (cleanRow >= 0 && overlapsMascotSource(x, cleanRow, w, rows)) cleanRow--;
-    const fill = cleanRow >= 0 ? pixels[cleanRow][x] : [0, 0, 0];
-    for (let r = mascotTop; r < rows; r++) {
-      if (overlapsMascotSource(x, r, w, rows)) pixels[r][x] = fill;
+  const legRowsFrom = mascotTop + mascotRows - 2;
+  for (let r = mascotTop; r < rows; r++) {
+    if (r >= legRowsFrom) {
+      for (let x = 0; x < w; x++) {
+        if (overlapsMascotSource(x, r, w, rows)) pixels[r][x] = [0, 0, 0];
+      }
+      continue;
+    }
+    for (let x = 0; x < w; x++) {
+      if (!overlapsMascotSource(x, r, w, rows)) continue;
+      let left = x - 1;
+      while (left >= 0 && overlapsMascotSource(left, r, w, rows)) left--;
+      let right = x + 1;
+      while (right < w && overlapsMascotSource(right, r, w, rows)) right++;
+      const leftDist = left >= 0 ? x - left : Infinity;
+      const rightDist = right < w ? right - x : Infinity;
+      if (leftDist === Infinity && rightDist === Infinity) pixels[r][x] = [0, 0, 0];
+      else pixels[r][x] = leftDist <= rightDist ? pixels[r][left] : pixels[r][right];
     }
   }
 
