@@ -4,6 +4,7 @@
 
 import { execFile } from 'child_process';
 import readline from 'readline';
+import { MOUNTAIN_GRID_B64, MOUNTAIN_GRID_W, MOUNTAIN_GRID_H } from './mountain-data.js';
 
 const ESC = '\x1b[';
 const RESET = `${ESC}0m`;
@@ -25,13 +26,6 @@ export const colors = {
   steelBlue: `${ESC}38;2;89;166;192m`,
   // --zora-eye: hsl(216 8% 12%) → rgb(28,30,33), the mascot's eye color.
   eyeDark: `${ESC}38;2;28;30;33m`,
-  // Mountain-range palette — three ridges at increasing "distance", cooler
-  // and lighter the farther back (atmospheric haze), darkest up close. Each
-  // ridge also gets its own ░▒▓█ light-to-dark grain from peak-tip to base
-  // (moonlit edge fading into shadow), layered on top of this base hue.
-  mtFar: `${ESC}38;2;150;158;168m`,
-  mtMid: `${ESC}38;2;92;101;112m`,
-  mtNear: `${ESC}38;2;46;52;60m`,
 };
 
 export function c(text, color) {
@@ -153,156 +147,88 @@ export function mascot({ bodyColor = 'steelBlue', eyeColor = 'eyeDark' } = {}) {
   ).join('\n');
 }
 
-// A single period of a sharp-cornered triangle wave in [-1, 1] — unlike a
-// sine, this has real angular peaks and valleys, which is what makes the
-// stacked-octave sum below read as jagged rock instead of rolling hills.
-function triangleWave(t) {
-  const x = ((t % 1) + 1) % 1;
-  return x < 0.5 ? 4 * x - 1 : 3 - 4 * x;
+// The mountain backdrop is not procedurally generated — it's a real 24-bit
+// RGB render of the reference artwork, baked into src/mountain-data.js
+// (420x140, row-major, base64) and reproduced here with Unicode upper-half
+// blocks (▀): true-color foreground = top pixel, background = bottom
+// pixel, doubling vertical resolution per character row. Same technique
+// tools like `chafa` use to turn a real image into terminal art.
+let _mountainRGB = null;
+function mountainRGB() {
+  if (!_mountainRGB) _mountainRGB = Buffer.from(MOUNTAIN_GRID_B64, 'base64');
+  return _mountainRGB;
 }
 
-// A jagged ridge silhouette built from a few octaves of triangle waves —
-// each pass roughly doubles the frequency and halves the amplitude (a small
-// fractal/fBm sum), which is what gives a real mountain skyline its mix of
-// a few big peaks with smaller, rockier detail riding on their slopes.
-function ridgeHeights(width, { base, amp, freq, phase, octaves = 3 }) {
-  const heights = [];
-  for (let x = 0; x < width; x++) {
-    const t = x / width;
-    let h = base;
-    let a = amp;
-    let f = freq;
-    for (let o = 0; o < octaves; o++) {
-      h += a * triangleWave(t * f + phase + o * 0.37);
-      a *= 0.5;
-      f *= 2.15;
+// Area-average box downsample: output pixel (px, py) in a wOut x hOut grid
+// averages every source pixel in its corresponding box of the baked
+// MOUNTAIN_GRID_W x MOUNTAIN_GRID_H source — keeps thin bright details
+// (star pixels, peak highlights) from disappearing when scaled down to a
+// narrow terminal column, unlike nearest-neighbor sampling.
+function sampleBox(buf, px, py, wOut, hOut) {
+  const x0 = Math.floor((px / wOut) * MOUNTAIN_GRID_W);
+  const x1 = Math.max(x0 + 1, Math.floor(((px + 1) / wOut) * MOUNTAIN_GRID_W));
+  const y0 = Math.floor((py / hOut) * MOUNTAIN_GRID_H);
+  const y1 = Math.max(y0 + 1, Math.floor(((py + 1) / hOut) * MOUNTAIN_GRID_H));
+  let r = 0, g = 0, b = 0, n = 0;
+  for (let y = y0; y < y1 && y < MOUNTAIN_GRID_H; y++) {
+    for (let x = x0; x < x1 && x < MOUNTAIN_GRID_W; x++) {
+      const idx = (y * MOUNTAIN_GRID_W + x) * 3;
+      r += buf[idx]; g += buf[idx + 1]; b += buf[idx + 2];
+      n++;
     }
-    heights.push(h);
   }
-  return heights;
+  if (n === 0) return [0, 0, 0];
+  return [Math.round(r / n), Math.round(g / n), Math.round(b / n)];
 }
 
-// A classic 4x4 Bayer matrix — the standard ordered-dithering pattern used
-// to turn a smooth gradient into halftone-style dots without any
-// randomness: each cell's threshold is a fixed function of (x mod 4, y mod
-// 4), so the exact same input always dithers to the exact same output.
-// That determinism is what keeps this reading as an engraved halftone grain
-// (like the reference image's stippled peaks) instead of TV static — a
-// flat single-character-per-band fill was tried first and read as solid
-// color blocks with no texture at all; this is what actually produces the
-// grain while staying fully reproducible.
-const BAYER4 = [
-  [0, 8, 2, 10],
-  [12, 4, 14, 6],
-  [3, 11, 1, 9],
-  [15, 7, 13, 5],
-];
-const DITHER_LEVELS = [' ', '░', '▒', '▓', '█']; // 0%, 25%, 50%, 75%, 100% coverage
-
-// Maps a continuous coverage value (0 = empty, 1 = fully solid) at column
-// x / row y to one of the five coverage glyphs above, using the Bayer
-// matrix to decide which side of the nearest two levels to round to. This
-// is what turns a smooth "light tip fading to dark base" gradient into
-// visible halftone grain: cells right at a band boundary flip between the
-// two neighboring glyphs in the matrix's fixed checkerboard-like pattern.
-function ditherChar(coverage, x, y) {
-  const scaled = Math.max(0, Math.min(1, coverage)) * (DITHER_LEVELS.length - 1);
-  const lo = Math.floor(scaled);
-  const frac = scaled - lo;
-  const threshold = (BAYER4[y % 4][x % 4] + 0.5) / 16;
-  const level = frac > threshold ? Math.min(DITHER_LEVELS.length - 1, lo + 1) : lo;
-  return DITHER_LEVELS[level];
+function rgbColor(rgb) {
+  return `${ESC}38;2;${rgb[0]};${rgb[1]};${rgb[2]}m`;
 }
 
-// A mountain-landscape backdrop for the mascot: three overlapping ridgelines
-// receding into the distance (lightest/hazy far range down to a dark near
-// range), scattered stars in the open sky, framed top and bottom by a
-// dotted horizon line (unless `border: false`, for when it's embedded as a
-// column inside a bordered box that already draws its own edges), with the
-// Zora mascot standing on the near ridge at the left. Terrain is generated
-// across the *entire* canvas height (sky rows + mascot rows combined), not
-// just the sky band — every column's nearest ridge always reaches the very
-// bottom row (min height is clamped to 1), so the range runs unbroken all
-// the way down to the ground the mascot stands on, with no black gap
-// between the mountain's foot and the mascot's row. Rows come back
-// pre-colored and padded to `width` visible columns, ready to drop into a
-// full-width splash or a welcome-panel column.
+// A mountain-landscape backdrop for the mascot, reproducing the reference
+// artwork's actual skyline/shading (see mountainRGB above) rather than an
+// algorithmic approximation. Framed top and bottom by a dotted horizon
+// line (unless `border: false`, for when it's embedded as a column inside
+// a bordered box that already draws its own edges), with the Zora mascot
+// standing at the left in the CLI's own brand color, drawn over the baked
+// terrain. Rows come back pre-colored and padded to `width` visible
+// columns, ready to drop into a full-width splash or a welcome-panel column.
 export function mountainScene(width = 60, { skyRows = 9, border = true } = {}) {
   const w = Math.max(22, width);
   const mascotRows = MASCOT_GRID.length;
-  const rows = skyRows + mascotRows; // full canvas height, sky + ground
+  const rows = skyRows + mascotRows; // character rows, sky + ground
 
-  // Farthest ridge: tallest, lightest, broadest peaks, reaching well up
-  // into the sky band. Nearest ridge: shortest overall but darkest, and —
-  // because every ridge's minimum height is clamped to 1 row — it always
-  // touches the bottom row in every column, forming the unbroken ground
-  // line the mascot stands on. More octaves + higher frequency than before
-  // so the skyline reads as a real jagged multi-peak range (several sharp
-  // summits, not just one or two rounded bumps) with mismatched
-  // frequencies/phases so the three skylines never line up — that's what
-  // reads as ranges overlapping and receding into the distance rather than
-  // one repeated shape.
-  const ridges = [
-    { heights: ridgeHeights(w, { base: rows * 0.60, amp: rows * 0.28, freq: 1.7, phase: 0.1, octaves: 3 }), color: 'mtFar' },
-    { heights: ridgeHeights(w, { base: rows * 0.42, amp: rows * 0.18, freq: 2.6, phase: 1.6, octaves: 3 }), color: 'mtMid' },
-    { heights: ridgeHeights(w, { base: rows * 0.30, amp: rows * 0.24, freq: 2.1, phase: 3.1, octaves: 3 }), color: 'mtNear' },
-  ];
+  const buf = mountainRGB();
+  const pixels = Array.from({ length: rows }, (_, py) =>
+    Array.from({ length: w }, (_, px) => sampleBox(buf, px, py, w, rows))
+  );
 
-  // Paint back-to-front so nearer ridges overwrite farther ones wherever
-  // they overlap — that overwrite order is what creates the depth effect.
-  const cell = Array.from({ length: rows }, () => Array(w).fill(null));
-  ridges.forEach(({ heights, color }, ridgeIndex) => {
-    for (let x = 0; x < w; x++) {
-      const h = Math.max(1, Math.min(rows, Math.round(heights[x])));
-      const top = rows - h;
-      for (let y = top; y < rows; y++) {
-        // Depth from *this ridge's own* peak tip at this column, eased so
-        // most of the peak's body stays dense/solid and only the last
-        // stretch near its own base fades toward sparse — a moonlit tip
-        // easing into a shadowed foot, dithered rather than banded flat.
-        const depth = h <= 1 ? 1 : (y - top) / (h - 1);
-        const coverage = 0.86 - 0.74 * Math.pow(depth, 1.6);
-        const ch = ditherChar(coverage, x, y);
-        // A ' ' result means "sparse enough to let what's behind show
-        // through" — skip painting so an earlier (farther) ridge or the
-        // plain night sky remains visible, which is also what produces the
-        // speckled transition zones between overlapping ridges. The very
-        // last row is always forced solid so the terrain never breaks the
-        // unbroken ground line the mascot stands on.
-        if (ch === ' ' && y !== rows - 1) continue;
-        cell[y][x] = { ch: ch === ' ' ? '█' : ch, color };
-      }
-    }
-  });
-
-  // A handful of stars in whatever open sky is left, weighted toward the
-  // upper rows where the ridges never reach.
-  const starCols = [0.05, 0.22, 0.5, 0.7, 0.88, 0.96];
-  starCols.forEach((frac, i) => {
-    const row = i % 3;
-    const col = Math.round(frac * (w - 1));
-    if (!cell[row][col]) cell[row][col] = { ch: '*', color: 'dim' };
-  });
-
-  // The mascot overlays the terrain on the bottom `mascotRows` rows, at
-  // the left — only its own non-empty cells replace what's underneath, so
-  // the mountain terrain stays visible behind/around it instead of a
-  // blank box.
+  // The mascot overlays the terrain on the bottom `mascotRows` character
+  // rows, at the left — only its own non-empty cells replace what's
+  // underneath, so the baked terrain stays visible behind/around it.
   const mascotTop = rows - mascotRows;
+  const mascotCell = Array.from({ length: rows }, () => Array(w).fill(null));
   MASCOT_GRID.forEach((row, ri) => {
     row.forEach((cellValue, ci) => {
       if (cellValue === 0) return;
       const col = 2 + ci * 2;
       const color = cellValue === 2 ? 'eyeDark' : 'steelBlue';
       for (const dc of [0, 1]) {
-        if (col + dc < w) cell[mascotTop + ri][col + dc] = { ch: '█', color };
+        if (col + dc < w) mascotCell[mascotTop + ri][col + dc] = color;
       }
     });
   });
 
-  const lines = cell.map((row) =>
-    row.map((data) => (data ? c(data.ch, data.color) : ' ')).join('')
-  );
+  const lines = [];
+  for (let r = 0; r < rows; r++) {
+    const pixelRow = pixels[r];
+    let line = '';
+    for (let x = 0; x < w; x++) {
+      const mColor = mascotCell[r][x];
+      line += mColor ? c('█', mColor) : rgbColor(pixelRow[x]) + '█' + RESET;
+    }
+    lines.push(line);
+  }
 
   if (!border) return lines;
   const dots = c('.'.repeat(w), 'dim');
