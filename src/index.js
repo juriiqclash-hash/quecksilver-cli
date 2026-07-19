@@ -8,7 +8,7 @@ import {
 } from './config.js';
 import { runLoginFlow } from './auth.js';
 import {
-  c, mascot, logoArt, twoColumnBox, divider, terminalWidth, clearScreen, padToBottom,
+  c, mascot, logoArt, twoColumnBox, terminalWidth, clearScreen,
   centerBlock, visibleLength, startThinkingSpinner, openPath, readBoxedInput,
 } from './ui.js';
 
@@ -88,7 +88,7 @@ async function fetchAccountInfo(token) {
 // the top of the window, the same way Claude Code's own splash does.
 function printWelcomeBanner() {
   clearScreen();
-  const width = terminalWidth({ min: 60, max: 110 });
+  const width = terminalWidth({ min: 80, max: 200 });
   console.log();
   console.log(c('Welcome to QueckSilver CLI', 'steelBlue') + c(' · ', 'gray') + c(`v${VERSION}`, 'gray'));
   console.log();
@@ -119,7 +119,7 @@ function printWelcomePanel({ email, isPro }) {
   const rawName = email.split('@')[0] || 'there';
   const name = rawName.charAt(0).toUpperCase() + rawName.slice(1);
 
-  const total = terminalWidth({ min: 80, max: 110 });
+  const total = terminalWidth({ min: 80, max: 200 });
   // Non-content characters twoColumnBox always draws: left border + left
   // padding*2 + divider + right padding*2 + right border = 1+2+1+2+1.
   const structureOverhead = 7;
@@ -153,7 +153,9 @@ function printWelcomePanel({ email, isPro }) {
 
   const leftLines = [
     ...centerBlock([c(`Welcome back, ${name}!`, 'bold')], leftContentWidth),
+    '',
     ...centerBlock(mascot().split('\n'), leftContentWidth),
+    '',
     '',
     ...centerBlock([
       statRow('Model', c('Zora 6.1', 'steelBlue')),
@@ -754,16 +756,15 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], u
     saveLastSession(history);
   };
 
+  // Same terminalWidth() range the welcome panel above used for its own
+  // `total`, so the input box lines up edge-to-edge with it instead of a
+  // narrower default width leaving it looking cut short.
+  const chatWidth = terminalWidth({ min: 80, max: 200 });
+
   // Draws the input as a real box — rule, typed text, rule, status line —
   // and resolves with whatever was typed. See readBoxedInput() in ui.js for
   // why this replaced the old readline-based prompt.
-  const promptNext = () => readBoxedInput({ statusText: STATUS_TEXT, knownCommands: KNOWN_SLASH_COMMANDS });
-
-  // Push the first prompt down to the terminal's bottom row instead of
-  // leaving it stranded right under the welcome panel with a wall of
-  // unused space below — only for this very first prompt; once the
-  // conversation is scrolling, natural terminal flow takes over.
-  padToBottom(lines, { reserve: 4 });
+  const promptNext = () => readBoxedInput({ width: chatWidth, statusText: STATUS_TEXT, knownCommands: KNOWN_SLASH_COMMANDS });
 
   while (true) {
     const line = await promptNext();
