@@ -10,7 +10,7 @@ import { runLoginFlow } from './auth.js';
 import {
   c, mascot, logoArt, twoColumnBox, terminalWidth, clearScreen,
   centerBlock, visibleLength, startThinkingSpinner, openPath, readBoxedInput,
-  padToBottom,
+  padToBottom, waitBriefly,
 } from './ui.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -967,10 +967,17 @@ export async function main(options) {
       console.log(JSON.stringify({ error: 'Not logged in. Run "quecksilver login".' }));
       process.exit(1);
     }
-    printWelcomeBanner();
-    console.log(c('You are not logged in yet.', 'yellow'));
-    console.log(`Run ${c('quecksilver login', 'steelBlue')} to sign in and get started.`);
-    console.log();
+    const redraw = () => {
+      printWelcomeBanner();
+      console.log(c('You are not logged in yet.', 'yellow'));
+      console.log(`Run ${c('quecksilver login', 'steelBlue')} to sign in and get started.`);
+      console.log();
+    };
+    redraw();
+    // The program would otherwise exit the instant this prints, leaving
+    // nothing running to catch a resize/zoom right after — this keeps it
+    // alive just long enough to redraw cleanly if that happens.
+    await waitBriefly({ onResize: redraw });
     return;
   }
 
