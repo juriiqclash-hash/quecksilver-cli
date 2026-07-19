@@ -5,6 +5,7 @@
 import { execFile } from 'child_process';
 import readline from 'readline';
 import { MOUNTAIN_GRID_B64, MOUNTAIN_GRID_W, MOUNTAIN_GRID_H } from './mountain-data.js';
+import { LOGO_GRID_B64, LOGO_GRID_W, LOGO_GRID_H } from './logo-data.js';
 
 const ESC = '\x1b[';
 const RESET = `${ESC}0m`;
@@ -38,6 +39,18 @@ export function visibleLength(str) {
   return str.replace(/\x1b\[[0-9;]*m/g, '').length;
 }
 
+// Centers a block of (possibly colored) lines together as one unit — every
+// line gets the same left padding, derived from the block's widest line,
+// so lines meant to stay mutually aligned (e.g. "Label: value" rows
+// sharing a label column) keep that alignment instead of each drifting to
+// its own individual center. The caller's box-drawing already right-pads
+// to column width, so only left padding needs adding here.
+export function centerBlock(lines, width) {
+  const maxLen = Math.max(0, ...lines.map(visibleLength));
+  const left = Math.floor(Math.max(0, width - maxLen) / 2);
+  return lines.map((line) => ' '.repeat(left) + line);
+}
+
 // Renders a single bordered box split into two columns by one continuous
 // vertical rule (│, meeting the top/bottom borders at ┬/┴) — one rectangle,
 // not two separate boxes glued together, so a tall right column (like the
@@ -46,24 +59,30 @@ export function visibleLength(str) {
 // "┌─ title ─...─┬─...─┐" instead of a plain rule. `leftWidth`/`rightWidth`
 // are content widths (excluding padding/border); given explicitly they let
 // the caller guarantee the box never grows past a pre-computed budget.
-export function twoColumnBox(leftLines, rightLines, { color = 'steelBlue', padding = 1, title, leftWidth, rightWidth } = {}) {
+// `dividerInset` makes the vertical rule "float" — it's left out of the
+// top/bottom `dividerInset` rows (rendered as plain space there instead),
+// and the border itself becomes a plain, unbroken rule with no ┬/┴ mark,
+// since the rule no longer actually touches it.
+export function twoColumnBox(leftLines, rightLines, { color = 'steelBlue', padding = 1, title, leftWidth, rightWidth, dividerInset = 0 } = {}) {
   const lw = leftWidth ?? Math.max(0, ...leftLines.map(visibleLength));
   const rw = rightWidth ?? Math.max(0, ...rightLines.map(visibleLength));
   const pad = ' '.repeat(padding);
   const leftInner = lw + padding * 2;
   const rightInner = rw + padding * 2;
   const height = Math.max(leftLines.length, rightLines.length);
+  const junction = dividerInset > 0 ? '─' : '┬';
+  const bottomJunction = dividerInset > 0 ? '─' : '┴';
 
   let top;
   if (title) {
     const label = ` ${title} `;
     const trailing = Math.max(1, leftInner - 1 - visibleLength(label));
     top = c('┌─', color) + c(label, color) + c('─'.repeat(trailing), color)
-      + c('┬', color) + c('─'.repeat(rightInner), color) + c('┐', color);
+      + c(junction, color) + c('─'.repeat(rightInner), color) + c('┐', color);
   } else {
-    top = c('┌' + '─'.repeat(leftInner) + '┬' + '─'.repeat(rightInner) + '┐', color);
+    top = c('┌' + '─'.repeat(leftInner) + junction + '─'.repeat(rightInner) + '┐', color);
   }
-  const bottom = c('└' + '─'.repeat(leftInner) + '┴' + '─'.repeat(rightInner) + '┘', color);
+  const bottom = c('└' + '─'.repeat(leftInner) + bottomJunction + '─'.repeat(rightInner) + '┘', color);
 
   const rows = [];
   for (let i = 0; i < height; i++) {
@@ -71,9 +90,11 @@ export function twoColumnBox(leftLines, rightLines, { color = 'steelBlue', paddi
     const r = rightLines[i] ?? '';
     const lPad = ' '.repeat(Math.max(0, lw - visibleLength(l)));
     const rPad = ' '.repeat(Math.max(0, rw - visibleLength(r)));
+    const showDivider = i >= dividerInset && i < height - dividerInset;
+    const dividerChar = showDivider ? c('│', color) : ' ';
     rows.push(
       c('│', color) + pad + l + lPad + pad
-        + c('│', color) + pad + r + rPad + pad
+        + dividerChar + pad + r + rPad + pad
         + c('│', color)
     );
   }
@@ -327,6 +348,53 @@ export function mountainScene(width = 60, { skyRows = 9, border = true } = {}) {
   if (!border) return lines;
   const dots = c('.'.repeat(w), 'dim');
   return [dots, ...lines, dots];
+}
+
+let _logoRGB = null;
+function logoRGB() {
+  if (!_logoRGB) _logoRGB = Buffer.from(LOGO_GRID_B64, 'base64');
+  return _logoRGB;
+}
+
+// Same box-average downsample as sampleBox() above, but parameterized so
+// it can be reused against a differently-sized baked grid (the logo is
+// 420x34, not 420x70).
+function sampleBoxGrid(buf, gridW, gridH, px, py, wOut, hOut) {
+  const x0 = Math.floor((px / wOut) * gridW);
+  const x1 = Math.max(x0 + 1, Math.floor(((px + 1) / wOut) * gridW));
+  const y0 = Math.floor((py / hOut) * gridH);
+  const y1 = Math.max(y0 + 1, Math.floor(((py + 1) / hOut) * gridH));
+  let r = 0, g = 0, b = 0, n = 0;
+  for (let y = y0; y < y1 && y < gridH; y++) {
+    for (let x = x0; x < x1 && x < gridW; x++) {
+      const idx = (y * gridW + x) * 3;
+      r += buf[idx]; g += buf[idx + 1]; b += buf[idx + 2];
+      n++;
+    }
+  }
+  if (n === 0) return [0, 0, 0];
+  return [Math.round(r / n), Math.round(g / n), Math.round(b / n)];
+}
+
+// The QueckSilver text logo (baked reference image, see logo-data.js),
+// shown on the logged-out splash instead of the mountain motif. Rows
+// scale proportionally with the requested width, preserving the source
+// capture's own aspect ratio — it was captured directly from a terminal,
+// so it's already correctly proportioned for terminal character cells.
+export function logoArt(width = 80) {
+  const w = Math.max(20, width);
+  const rows = Math.max(1, Math.round((LOGO_GRID_H / LOGO_GRID_W) * w));
+  const buf = logoRGB();
+  const lines = [];
+  for (let py = 0; py < rows; py++) {
+    let line = '';
+    for (let px = 0; px < w; px++) {
+      const rgb = sampleBoxGrid(buf, LOGO_GRID_W, LOGO_GRID_H, px, py, w, rows);
+      line += rgbColor(rgb) + '█' + RESET;
+    }
+    lines.push(line);
+  }
+  return lines;
 }
 
 // A grab-bag of playful "thinking" verbs, shown at random while waiting on

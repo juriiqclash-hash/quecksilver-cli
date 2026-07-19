@@ -8,8 +8,8 @@ import {
 } from './config.js';
 import { runLoginFlow } from './auth.js';
 import {
-  c, mascot, mountainScene, twoColumnBox, divider, terminalWidth, clearScreen, padToBottom,
-  startThinkingSpinner, openPath, enableSlashCommandHighlight,
+  c, mascot, logoArt, twoColumnBox, divider, terminalWidth, clearScreen, padToBottom,
+  centerBlock, visibleLength, startThinkingSpinner, openPath, enableSlashCommandHighlight,
 } from './ui.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -81,18 +81,17 @@ async function fetchAccountInfo(token) {
   return { email, isPro };
 }
 
-// The logged-out splash: title and version on one edge-aligned line, then
-// the mountain-and-mascot motif stretched across the terminal — shown
-// before we know whether to start a session or point the user at
+// The logged-out splash: the QueckSilver wordmark rendered big from a
+// baked reference capture (see logo-data.js), with the version underneath
+// — shown before we know whether to start a session or point the user at
 // `quecksilver login`. Clears the screen first so it lands flush against
 // the top of the window, the same way Claude Code's own splash does.
 function printWelcomeBanner() {
   clearScreen();
-  const width = terminalWidth({ min: 60, max: 96 });
+  const width = terminalWidth({ min: 60, max: 110 });
   console.log();
-  console.log(c('Welcome to QueckSilver AI', 'steelBlue') + c('  ·  ', 'gray') + c(`v${VERSION}`, 'gray'));
-  console.log();
-  console.log(mountainScene(width).join('\n'));
+  console.log(logoArt(width).join('\n'));
+  console.log(centerBlock([c(`v${VERSION}`, 'gray')], width).join('\n'));
   console.log();
 }
 
@@ -105,14 +104,14 @@ function fitPath(path, maxLen) {
 }
 
 // The logged-in welcome panel: one continuous bordered rectangle split by a
-// single vertical rule — stats (mascot, greeting, model/plan/version,
-// email/dir) on the left, the mountain motif continuing into the same
-// rectangle's free space on the right — shown once per session start
-// instead of the splash above. Left width is derived from the (fixed-ish)
-// stat text itself rather than guessed as a percentage of the terminal, so
-// it can never grow past its slot and steal space back from the motif on
-// narrow terminals; right width is whatever's left, which is exactly what
-// twoColumnBox is told to draw, so the box can never overflow either.
+// floating vertical rule (it doesn't touch the top/bottom border — see
+// `dividerInset` on twoColumnBox) — stats (greeting, mascot,
+// model/plan/version/email/dir, all centered as a block) on the left,
+// quick tips on the right — shown once per session start instead of the
+// splash above. Left width is derived from the (fixed-ish) stat text
+// itself rather than guessed as a percentage of the terminal, so it can
+// never grow past its slot; right width is derived from the tips' own
+// natural width the same way, so the box can never overflow either.
 function printWelcomePanel({ email, isPro }) {
   clearScreen();
   const plan = isPro ? 'Pro' : 'Free';
@@ -123,39 +122,49 @@ function printWelcomePanel({ email, isPro }) {
   // Non-content characters twoColumnBox always draws: left border + left
   // padding*2 + divider + right padding*2 + right border = 1+2+1+2+1.
   const structureOverhead = 7;
-  const rightMinContent = 22;
 
   // One stat per line with aligned labels ("Model:   ", "Version: ", ...)
-  // reads far better than cramming everything onto two dot-separated
-  // lines — the box's height is already set by the (much taller) mountain
-  // column next to it, so there's no vertical-space reason to cram.
+  // reads far better than cramming everything onto one dot-separated line,
+  // and centering the whole block (not each line individually) keeps the
+  // labels lined up with each other instead of each drifting to its own
+  // center.
   const labelWidth = Math.max('Model'.length, 'Plan'.length, 'Version'.length, 'Email'.length, 'Dir'.length) + 2;
   const minValueWidth = 30;
-  const leftContentWidth = Math.max(
-    labelWidth + minValueWidth,
-    Math.min(56, total - structureOverhead - rightMinContent),
-  );
+  const mascotWidth = Math.max(...mascot().split('\n').map(visibleLength));
+  const leftMinWidth = Math.max(labelWidth + minValueWidth, mascotWidth);
+  const rightMinWidth = QUICK_TIPS_COL_WIDTH + 4; // command column + quickTipsLines' own forced-minimum description length
+
+  // leftContentWidth + rightContentWidth + structureOverhead always equals
+  // `total` exactly — no independent "natural width" on either side that
+  // could add up to more than the terminal actually has. Quick-tip text is
+  // fixed content (unlike the old mountain motif, generated at exactly the
+  // width asked for), so quickTipsLines() truncates its own descriptions
+  // to whatever rightContentWidth turns out to be, rather than assuming
+  // they already fit.
+  const leftContentWidth = Math.max(leftMinWidth, Math.min(50, total - structureOverhead - rightMinWidth));
   const rightContentWidth = total - structureOverhead - leftContentWidth;
+  const rightLines = quickTipsLines(rightContentWidth);
 
   const dirDisplay = fitPath(process.cwd(), Math.max(8, leftContentWidth - labelWidth));
   const statRow = (label, value) => c(`${label}:`.padEnd(labelWidth), 'gray') + value;
 
   const leftLines = [
-    '', // breathing room between the "QueckSilver CLI" title and the mascot
-    ...mascot().split('\n'),
+    ...centerBlock([c(`Welcome back, ${name}!`, 'bold')], leftContentWidth),
+    ...centerBlock(mascot().split('\n'), leftContentWidth),
     '',
-    c(`Welcome back, ${name}!`, 'bold'),
-    statRow('Model', c('Zora 6.1', 'steelBlue')),
-    statRow('Plan', c(plan, 'steelBlue')),
-    statRow('Version', `v${VERSION}`),
-    statRow('Email', email),
-    statRow('Dir', dirDisplay),
+    ...centerBlock([
+      statRow('Model', c('Zora 6.1', 'steelBlue')),
+      statRow('Plan', c(plan, 'steelBlue')),
+      statRow('Version', `v${VERSION}`),
+      statRow('Email', email),
+      statRow('Dir', dirDisplay),
+    ], leftContentWidth),
   ];
-  const rightLines = mountainScene(rightContentWidth, { border: false });
 
   const output = twoColumnBox(leftLines, rightLines, {
     color: 'steelBlue', title: 'QueckSilver CLI',
     leftWidth: leftContentWidth, rightWidth: rightContentWidth,
+    dividerInset: 1,
   });
   console.log(output);
   console.log();
@@ -363,25 +372,83 @@ export function printCommandList() {
 }
 
 // A handful of highlights from COMMAND_SECTIONS — not the full reference
-// (that's /commands), just enough to fill the gap between the welcome
-// panel and the bottom-anchored prompt with something useful to read.
+// (that's /commands), just enough to fill the welcome panel's right column
+// with something useful to read.
 const QUICK_TIPS = [
   ['/image <prompt>', 'Generate or edit an image'],
   ['/search <query>', 'Force a web search'],
   ['/doc <type> <topic>', 'Generate a docx/xlsx/pptx/pdf/markdown/csv'],
+  ['/music <prompt>', 'Generate a short music track'],
+  ['/file <path>', 'Attach a file to your next message'],
   ['-c, --continue', 'Resume your last session'],
+  ['/commands', 'Show the full command reference'],
 ];
+// The command column's fixed width — printWelcomePanel also needs this to
+// size the right column wide enough to fit at least a few description
+// characters (see rightMinWidth there), not just the commands themselves.
+const QUICK_TIPS_COL_WIDTH = Math.max(...QUICK_TIPS.map(([cmd]) => cmd.length)) + 2;
 
-// Prints the quick-tips block and returns how many terminal lines it used,
-// so the caller can fold that into its running line count for padToBottom.
-function printQuickTips() {
-  console.log(c('Quick tips:', 'gray'));
-  const colWidth = Math.max(...QUICK_TIPS.map(([cmd]) => cmd.length)) + 2;
-  QUICK_TIPS.forEach(([cmd, desc]) => {
-    console.log(`  ${c(cmd.padEnd(colWidth), 'blue')}${c(desc, 'gray')}`);
-  });
+// Formats the quick-tips block as plain lines (not printed directly) so it
+// can be dropped straight into the welcome panel's right column. Truncates
+// each description to fit `maxWidth` — the panel hands this a fixed
+// column budget, and unlike the old mountain motif (generated at exactly
+// the width asked for) this is fixed text, so on a narrow terminal it has
+// to be cut down rather than trusted to already fit.
+function quickTipsLines(maxWidth) {
+  const colWidth = QUICK_TIPS_COL_WIDTH;
+  return [
+    c('Quick tips:', 'gray'),
+    '',
+    ...QUICK_TIPS.map(([cmd, desc]) => {
+      const cmdPart = cmd.padEnd(colWidth);
+      const maxDesc = Math.max(4, maxWidth - cmdPart.length);
+      const shownDesc = desc.length > maxDesc ? `${desc.slice(0, Math.max(1, maxDesc - 1))}…` : desc;
+      return `${c(cmdPart, 'blue')}${c(shownDesc, 'gray')}`;
+    }),
+  ];
+}
+
+// The "getting started" callout that replaces the quick-tips block below
+// the welcome panel (tips live inside the panel itself now) — a plain
+// intro to what this CLI is, styled with a left accent bar like Claude
+// Code's own release-notes callout, ending in a link to the full docs.
+// Returns how many terminal lines it used, so the caller can fold that
+// into its running line count for padToBottom.
+const ABOUT_TEXT = 'QueckSilver CLI brings QueckSilver AI (Zora) into your terminal: chat, '
+  + 'attach files, generate images and documents, or run one-off prompts without leaving your shell.';
+
+function wrapText(text, maxWidth) {
+  const words = text.split(' ');
+  const lines = [];
+  let current = '';
+  for (const word of words) {
+    const next = current ? `${current} ${word}` : word;
+    if (next.length > maxWidth && current) {
+      lines.push(current);
+      current = word;
+    } else {
+      current = next;
+    }
+  }
+  if (current) lines.push(current);
+  return lines;
+}
+
+function aboutSectionLineCount() {
+  const width = terminalWidth({ min: 60, max: 100 });
+  return wrapText(ABOUT_TEXT, width - 2).length + 4; // heading + body + blank separator + link
+}
+
+function printAboutSection() {
+  const width = terminalWidth({ min: 60, max: 100 });
+  const bar = c('│', 'steelBlue');
+  console.log(bar + ' ' + c('This is QueckSilver CLI', 'steelBlue'));
+  const bodyLines = wrapText(ABOUT_TEXT, width - 2);
+  bodyLines.forEach((line) => console.log(`${bar} ${line}`));
+  console.log(bar);
+  console.log(`${bar} ${c('More details here: ', 'gray')}${c('https://quecksilver.ch/cli', 'blue')}`);
   console.log();
-  return QUICK_TIPS.length + 2;
+  return bodyLines.length + 4;
 }
 
 // Directly invokes one tool server-side (bypasses Zora's own tool choice) —
@@ -639,10 +706,10 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], u
 
   // Only worth showing if there's genuine room to spare — on a short
   // terminal this would just eat into the space padToBottom needs to push
-  // the prompt down, which matters more than the tips do.
-  const tipsCost = QUICK_TIPS.length + 2;
-  if (process.stdout.isTTY && (process.stdout.rows || 24) - lines - tipsCost - 4 > 0) {
-    lines += printQuickTips();
+  // the prompt down, which matters more than the about blurb does.
+  const aboutCost = aboutSectionLineCount();
+  if (process.stdout.isTTY && (process.stdout.rows || 24) - lines - aboutCost - 4 > 0) {
+    lines += printAboutSection();
   }
 
   const promptText = c('you> ', 'steelBlue');
