@@ -381,6 +381,12 @@ function sampleBoxGrid(buf, gridW, gridH, px, py, wOut, hOut) {
 // scale proportionally with the requested width, preserving the source
 // capture's own aspect ratio — it was captured directly from a terminal,
 // so it's already correctly proportioned for terminal character cells.
+// Pixels this dark (in all three channels) are the source capture's black
+// backdrop, not part of the wordmark itself — printed as a plain space
+// instead of a colored block so the terminal's own background shows
+// through, rather than a solid black rectangle sitting on top of it.
+const LOGO_BG_THRESHOLD = 20;
+
 export function logoArt(width = 80) {
   const w = Math.max(20, width);
   const rows = Math.max(1, Math.round((LOGO_GRID_H / LOGO_GRID_W) * w));
@@ -390,7 +396,8 @@ export function logoArt(width = 80) {
     let line = '';
     for (let px = 0; px < w; px++) {
       const rgb = sampleBoxGrid(buf, LOGO_GRID_W, LOGO_GRID_H, px, py, w, rows);
-      line += rgbColor(rgb) + '█' + RESET;
+      const isBackground = rgb[0] < LOGO_BG_THRESHOLD && rgb[1] < LOGO_BG_THRESHOLD && rgb[2] < LOGO_BG_THRESHOLD;
+      line += isBackground ? ' ' : rgbColor(rgb) + '█' + RESET;
     }
     lines.push(line);
   }
@@ -486,6 +493,105 @@ export function enableSlashCommandHighlight(rl, promptColored, knownCommands) {
         // Best-effort visual polish — never worth crashing the session over.
       }
     });
+  });
+}
+
+// Renders the chat input as a genuine box — a full-width rule above and
+// below the typed text, with a slim status line underneath — and lets the
+// person type in the space between the two rules, like a real input field
+// rather than a single rule sitting above a plain readline prompt.
+//
+// Node's built-in readline has no way to keep content *below* the active
+// line alive across edits — it always redraws from its own cursor position
+// downward, wiping anything drawn after it on every keystroke (including
+// backspace). So instead of readline, this owns raw stdin directly and
+// redraws all four lines itself every time the buffer changes.
+//
+// `knownCommands` gets the same live blue highlight as the old
+// enableSlashCommandHighlight() did: the "/word" token turns blue the
+// moment it's an exact match, and reverts to plain the instant it isn't.
+export function readBoxedInput({ width, statusText, knownCommands = [] } = {}) {
+  return new Promise((resolve) => {
+    const w = width || terminalWidth();
+    const placeholder = 'Try "/commands" to see what you can do';
+    const known = new Set(knownCommands.map((k) => k.toLowerCase()));
+    let buf = '';
+    let firstDraw = true;
+
+    const highlightedBuf = () => {
+      const match = buf.match(/^(\/\S*)([\s\S]*)$/);
+      if (match && known.has(match[1].slice(1).toLowerCase())) {
+        return c(match[1], 'blue') + match[2];
+      }
+      return buf;
+    };
+
+    const statusLine = () => {
+      const label = statusText || '';
+      const pad = Math.max(0, w - label.length);
+      return ' '.repeat(pad) + c(label, 'dim');
+    };
+
+    const render = () => {
+      const rule = divider(w);
+      const shown = buf ? highlightedBuf() : c(placeholder, 'dim');
+      return [rule, c('› ', 'steelBlue') + shown, rule, statusLine()];
+    };
+
+    const draw = () => {
+      if (!firstDraw) {
+        readline.moveCursor(process.stdout, 0, -4);
+        readline.cursorTo(process.stdout, 0);
+      }
+      firstDraw = false;
+      for (const line of render()) {
+        readline.clearLine(process.stdout, 0);
+        process.stdout.write(line + '\n');
+      }
+      // Park the cursor right after the typed text (row 2 of the 4 just
+      // drawn), not trailing after the status line.
+      readline.moveCursor(process.stdout, 0, -3);
+      readline.cursorTo(process.stdout, 2 + buf.length);
+    };
+
+    const stdin = process.stdin;
+    const wasRaw = stdin.isRaw;
+    readline.emitKeypressEvents(stdin);
+    if (stdin.setRawMode) stdin.setRawMode(true);
+    stdin.resume();
+
+    const cleanup = () => {
+      stdin.removeListener('keypress', onKeypress);
+      if (stdin.setRawMode) stdin.setRawMode(wasRaw ?? false);
+    };
+
+    const onKeypress = (str, key) => {
+      if (key && key.ctrl && key.name === 'c') {
+        cleanup();
+        process.stdout.write('\n');
+        process.exit(0);
+        return;
+      }
+      if (key && (key.name === 'return' || key.name === 'enter')) {
+        cleanup();
+        readline.moveCursor(process.stdout, 0, 3);
+        readline.cursorTo(process.stdout, 0);
+        resolve(buf);
+        return;
+      }
+      if (key && key.name === 'backspace') {
+        buf = buf.slice(0, -1);
+        draw();
+        return;
+      }
+      if (str && !key.ctrl && !key.meta) {
+        buf += str;
+        draw();
+      }
+    };
+
+    draw();
+    stdin.on('keypress', onKeypress);
   });
 }
 
