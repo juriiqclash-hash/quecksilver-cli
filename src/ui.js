@@ -182,14 +182,37 @@ function ridgeHeights(width, { base, amp, freq, phase, octaves = 3 }) {
   return heights;
 }
 
-// Deterministic per-cell noise in [0, 1) — no dependency needed for a
-// two-integer hash, just enough grain to break up flat fills.
-// Each of the four fractional-coverage Unicode blocks has its own *fixed*
-// dot/hatch pattern baked into the glyph — used as a flat fill (not mixed
-// per-cell), that fixed pattern alone is what produces a clean, regular
-// halftone-illustration look. Mixing several density levels per cell was
-// tried and reads as TV static instead — real texture, but chaotic rather
-// than the crisp engraved look real mountain art (and this reference) has.
+// A classic 4x4 Bayer matrix — the standard ordered-dithering pattern used
+// to turn a smooth gradient into halftone-style dots without any
+// randomness: each cell's threshold is a fixed function of (x mod 4, y mod
+// 4), so the exact same input always dithers to the exact same output.
+// That determinism is what keeps this reading as an engraved halftone grain
+// (like the reference image's stippled peaks) instead of TV static — a
+// flat single-character-per-band fill was tried first and read as solid
+// color blocks with no texture at all; this is what actually produces the
+// grain while staying fully reproducible.
+const BAYER4 = [
+  [0, 8, 2, 10],
+  [12, 4, 14, 6],
+  [3, 11, 1, 9],
+  [15, 7, 13, 5],
+];
+const DITHER_LEVELS = [' ', '░', '▒', '▓', '█']; // 0%, 25%, 50%, 75%, 100% coverage
+
+// Maps a continuous coverage value (0 = empty, 1 = fully solid) at column
+// x / row y to one of the five coverage glyphs above, using the Bayer
+// matrix to decide which side of the nearest two levels to round to. This
+// is what turns a smooth "light tip fading to dark base" gradient into
+// visible halftone grain: cells right at a band boundary flip between the
+// two neighboring glyphs in the matrix's fixed checkerboard-like pattern.
+function ditherChar(coverage, x, y) {
+  const scaled = Math.max(0, Math.min(1, coverage)) * (DITHER_LEVELS.length - 1);
+  const lo = Math.floor(scaled);
+  const frac = scaled - lo;
+  const threshold = (BAYER4[y % 4][x % 4] + 0.5) / 16;
+  const level = frac > threshold ? Math.min(DITHER_LEVELS.length - 1, lo + 1) : lo;
+  return DITHER_LEVELS[level];
+}
 
 // A mountain-landscape backdrop for the mascot: three overlapping ridgelines
 // receding into the distance (lightest/hazy far range down to a dark near
@@ -213,35 +236,41 @@ export function mountainScene(width = 60, { skyRows = 9, border = true } = {}) {
   // into the sky band. Nearest ridge: shortest overall but darkest, and —
   // because every ridge's minimum height is clamped to 1 row — it always
   // touches the bottom row in every column, forming the unbroken ground
-  // line the mascot stands on. Deliberately mismatched frequencies/phases
-  // so the three skylines never line up — that's what reads as ranges
-  // overlapping and receding into the distance rather than one repeated
-  // shape (matches the reference: a tall jagged spine of peaks with a
-  // smaller secondary hump peeking through the gaps, and a darker
-  // foreground shoulder running along the base).
+  // line the mascot stands on. More octaves + higher frequency than before
+  // so the skyline reads as a real jagged multi-peak range (several sharp
+  // summits, not just one or two rounded bumps) with mismatched
+  // frequencies/phases so the three skylines never line up — that's what
+  // reads as ranges overlapping and receding into the distance rather than
+  // one repeated shape.
   const ridges = [
-    { heights: ridgeHeights(w, { base: rows * 0.58, amp: rows * 0.24, freq: 1.05, phase: 0.15, octaves: 2 }), color: 'mtFar' },
-    { heights: ridgeHeights(w, { base: rows * 0.40, amp: rows * 0.16, freq: 1.9, phase: 2.1, octaves: 2 }), color: 'mtMid' },
-    { heights: ridgeHeights(w, { base: rows * 0.30, amp: rows * 0.22, freq: 1.55, phase: 3.55, octaves: 2 }), color: 'mtNear' },
+    { heights: ridgeHeights(w, { base: rows * 0.60, amp: rows * 0.28, freq: 1.7, phase: 0.1, octaves: 3 }), color: 'mtFar' },
+    { heights: ridgeHeights(w, { base: rows * 0.42, amp: rows * 0.18, freq: 2.6, phase: 1.6, octaves: 3 }), color: 'mtMid' },
+    { heights: ridgeHeights(w, { base: rows * 0.30, amp: rows * 0.24, freq: 2.1, phase: 3.1, octaves: 3 }), color: 'mtNear' },
   ];
 
   // Paint back-to-front so nearer ridges overwrite farther ones wherever
   // they overlap — that overwrite order is what creates the depth effect.
   const cell = Array.from({ length: rows }, () => Array(w).fill(null));
-  ridges.forEach(({ heights, color }) => {
+  ridges.forEach(({ heights, color }, ridgeIndex) => {
     for (let x = 0; x < w; x++) {
       const h = Math.max(1, Math.min(rows, Math.round(heights[x])));
       const top = rows - h;
       for (let y = top; y < rows; y++) {
-        // Depth from *this ridge's own* peak tip at this column drives a
-        // fixed ░▒▓█ gradient — light near the tip, solid near the base —
-        // independent of the far/mid/near hue shift above. Deterministic,
-        // not per-cell random noise: same depth always maps to the same
-        // glyph, which is what keeps it reading as clean engraved shading
-        // instead of static.
+        // Depth from *this ridge's own* peak tip at this column, eased so
+        // most of the peak's body stays dense/solid and only the last
+        // stretch near its own base fades toward sparse — a moonlit tip
+        // easing into a shadowed foot, dithered rather than banded flat.
         const depth = h <= 1 ? 1 : (y - top) / (h - 1);
-        const ch = depth < 0.22 ? '░' : depth < 0.5 ? '▒' : depth < 0.78 ? '▓' : '█';
-        cell[y][x] = { ch, color };
+        const coverage = 0.86 - 0.74 * Math.pow(depth, 1.6);
+        const ch = ditherChar(coverage, x, y);
+        // A ' ' result means "sparse enough to let what's behind show
+        // through" — skip painting so an earlier (farther) ridge or the
+        // plain night sky remains visible, which is also what produces the
+        // speckled transition zones between overlapping ridges. The very
+        // last row is always forced solid so the terrain never breaks the
+        // unbroken ground line the mascot stands on.
+        if (ch === ' ' && y !== rows - 1) continue;
+        cell[y][x] = { ch: ch === ' ' ? '█' : ch, color };
       }
     }
   });
