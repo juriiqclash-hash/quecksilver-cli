@@ -8,7 +8,7 @@ import {
 } from './config.js';
 import { runLoginFlow } from './auth.js';
 import {
-  c, mascot, mountainScene, twoColumnBox, divider, terminalWidth, clearScreen,
+  c, mascot, mountainScene, twoColumnBox, divider, terminalWidth, clearScreen, padToBottom,
   startThinkingSpinner, openPath, enableSlashCommandHighlight,
 } from './ui.js';
 
@@ -146,11 +146,13 @@ function printWelcomePanel({ email, isPro }) {
   ];
   const rightLines = mountainScene(rightContentWidth, { border: false });
 
-  console.log(twoColumnBox(leftLines, rightLines, {
+  const output = twoColumnBox(leftLines, rightLines, {
     color: 'steelBlue', title: 'QueckSilver CLI',
     leftWidth: leftContentWidth, rightWidth: rightContentWidth,
-  }));
+  });
+  console.log(output);
   console.log();
+  return output.split('\n').length + 1; // +1 for the trailing blank line above
 }
 
 function parseSettingValue(raw) {
@@ -600,9 +602,11 @@ async function oneOffForcedTool(forceTool, token, { files = [], output, json, op
   }
 }
 
-async function interactiveChat(token, { files = [], open, initialHistory = [] } = {}) {
+async function interactiveChat(token, { files = [], open, initialHistory = [], usedLines = 0 } = {}) {
+  let lines = usedLines;
   console.log(c('Type your message and press Enter to chat. Type "exit" to quit, or /commands to see everything else you can do.', 'gray'));
   console.log();
+  lines += 2;
 
   const promptText = c('you> ', 'steelBlue');
   const rl = readline.createInterface({
@@ -615,6 +619,7 @@ async function interactiveChat(token, { files = [], open, initialHistory = [] } 
   if (initialHistory.length > 0) {
     console.log(c(`Resumed previous session (${initialHistory.length / 2} turn(s)).`, 'gray'));
     console.log();
+    lines += 2;
   }
   let pendingFiles = files;
   let pendingOutput = null;
@@ -656,6 +661,11 @@ async function interactiveChat(token, { files = [], open, initialHistory = [] } 
     rl.prompt();
   };
 
+  // Push the first prompt down to the terminal's bottom row instead of
+  // leaving it stranded right under the welcome panel with a wall of
+  // unused space below — only for this very first prompt; once the
+  // conversation is scrolling, natural terminal flow takes over.
+  padToBottom(lines);
   promptNext();
 
   rl.on('line', async (line) => {
@@ -776,12 +786,13 @@ async function interactiveChat(token, { files = [], open, initialHistory = [] } 
 // Shared "start a session" step: shows the account panel, then drops into
 // either a forced-tool call, a one-off answer, or the interactive chat loop.
 async function startSession(token, options) {
+  let usedLines = 0;
   if (!options.json) {
     const [account] = await Promise.all([
       fetchAccountInfo(token),
       getSetting('checkUpdates') ? checkForUpdate() : Promise.resolve(),
     ]);
-    printWelcomePanel(account);
+    usedLines = printWelcomePanel(account);
   }
 
   let files = [];
@@ -811,6 +822,7 @@ async function startSession(token, options) {
       'gray',
     ));
     console.log();
+    usedLines += 2;
   }
 
   let prompt = (options.promptArgs || []).join(' ').trim();
@@ -823,7 +835,7 @@ async function startSession(token, options) {
       files, output: options.output, json: options.json, open: options.open, history: continuedHistory,
     });
   } else {
-    await interactiveChat(token, { files, open: options.open, initialHistory: continuedHistory });
+    await interactiveChat(token, { files, open: options.open, initialHistory: continuedHistory, usedLines });
   }
 }
 

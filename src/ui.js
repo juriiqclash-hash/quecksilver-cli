@@ -25,16 +25,13 @@ export const colors = {
   steelBlue: `${ESC}38;2;89;166;192m`,
   // --zora-eye: hsl(216 8% 12%) → rgb(28,30,33), the mascot's eye color.
   eyeDark: `${ESC}38;2;28;30;33m`,
-  // Mountain-range palette — three ridges at increasing "distance", each
-  // with a slightly lighter rim tone along its silhouette edge for a soft
-  // rim-light effect. Cooler and lighter the farther back, mimicking
-  // atmospheric haze; darkest and most saturated up close.
+  // Mountain-range palette — three ridges at increasing "distance", cooler
+  // and lighter the farther back (atmospheric haze), darkest up close. Each
+  // ridge's own light/dark shading comes from shadeChar's ░▒▓█ grain, not
+  // a second color, so one tone per ridge is enough.
   mtFar: `${ESC}38;2;98;109;122m`,
-  mtFarRim: `${ESC}38;2;134;145;158m`,
   mtMid: `${ESC}38;2;69;79;91m`,
-  mtMidRim: `${ESC}38;2;95;106;119m`,
   mtNear: `${ESC}38;2;42;49;58m`,
-  mtNearRim: `${ESC}38;2;61;69;80m`,
 };
 
 export function c(text, color) {
@@ -114,6 +111,20 @@ export function divider(width) {
   return c('─'.repeat(Math.max(10, w)), 'dim');
 }
 
+// Pads with blank lines so whatever prints right after lands on the
+// terminal's bottom row instead of trailing right after the welcome panel
+// with a wall of unused space below it — `usedLines` is how many terminal
+// rows the caller has already printed since the last clearScreen(), and
+// `reserve` is how many more rows the caller is about to print itself
+// (e.g. the divider + the input row). No-ops when stdout isn't a real TTY
+// or the content already fills (or exceeds) the terminal.
+export function padToBottom(usedLines, { reserve = 2 } = {}) {
+  if (!process.stdout.isTTY) return;
+  const rows = process.stdout.rows || 24;
+  const blanks = rows - usedLines - reserve;
+  for (let i = 0; i < blanks; i++) console.log();
+}
+
 // The QueckSilver / Zora pixel mascot — same 11x9 grid used by
 // src/components/PixelMascot.tsx in the main app (shared mark across
 // Council + Code workspace), reproduced here as colored terminal blocks.
@@ -171,6 +182,15 @@ function ridgeHeights(width, { base, amp, freq, phase, octaves = 3 }) {
   return heights;
 }
 
+// Deterministic per-cell noise in [0, 1) — no dependency needed for a
+// two-integer hash, just enough grain to break up flat fills.
+// Each of the four fractional-coverage Unicode blocks has its own *fixed*
+// dot/hatch pattern baked into the glyph — used as a flat fill (not mixed
+// per-cell), that fixed pattern alone is what produces a clean, regular
+// halftone-illustration look. Mixing several density levels per cell was
+// tried and reads as TV static instead — real texture, but chaotic rather
+// than the crisp engraved look real mountain art (and this reference) has.
+
 // A mountain-landscape backdrop for the mascot: three overlapping ridgelines
 // receding into the distance (lightest/hazy far range down to a dark near
 // range), scattered stars in the open sky, framed top and bottom by a
@@ -189,28 +209,21 @@ export function mountainScene(width = 60, { skyRows = 9, border = true } = {}) {
   // three skylines never line up — that's what reads as "alternating"
   // ranges receding into the distance rather than one repeated shape.
   const ridges = [
-    {
-      heights: ridgeHeights(w, { base: skyRows * 0.62, amp: skyRows * 0.30, freq: 1.3, phase: 0.15 }),
-      body: 'mtFar', rim: 'mtFarRim',
-    },
-    {
-      heights: ridgeHeights(w, { base: skyRows * 0.44, amp: skyRows * 0.26, freq: 2.1, phase: 1.85 }),
-      body: 'mtMid', rim: 'mtMidRim',
-    },
-    {
-      heights: ridgeHeights(w, { base: skyRows * 0.26, amp: skyRows * 0.22, freq: 3.0, phase: 3.4 }),
-      body: 'mtNear', rim: 'mtNearRim',
-    },
+    { heights: ridgeHeights(w, { base: skyRows * 0.62, amp: skyRows * 0.30, freq: 1.3, phase: 0.15 }), color: 'mtFar', ch: '░' },
+    { heights: ridgeHeights(w, { base: skyRows * 0.44, amp: skyRows * 0.26, freq: 2.1, phase: 1.85 }), color: 'mtMid', ch: '▒' },
+    { heights: ridgeHeights(w, { base: skyRows * 0.26, amp: skyRows * 0.22, freq: 3.0, phase: 3.4 }), color: 'mtNear', ch: '▓' },
   ];
 
   // Paint back-to-front so nearer ridges overwrite farther ones wherever
   // they overlap — that overwrite order is what creates the depth effect.
+  // Each ridge is one flat shade character, sparser the farther back —
+  // depth here comes from color + dot-density both shifting together.
   const cell = Array.from({ length: skyRows }, () => Array(w).fill(null));
-  ridges.forEach(({ heights, body, rim }) => {
+  ridges.forEach(({ heights, color, ch }) => {
     for (let x = 0; x < w; x++) {
       const h = Math.max(1, Math.min(skyRows, Math.round(heights[x])));
       const top = skyRows - h;
-      for (let y = top; y < skyRows; y++) cell[y][x] = y === top ? rim : body;
+      for (let y = top; y < skyRows; y++) cell[y][x] = { ch, color };
     }
   });
 
@@ -220,15 +233,11 @@ export function mountainScene(width = 60, { skyRows = 9, border = true } = {}) {
   starCols.forEach((frac, i) => {
     const row = i % 3;
     const col = Math.round(frac * (w - 1));
-    if (!cell[row][col]) cell[row][col] = 'star';
+    if (!cell[row][col]) cell[row][col] = { ch: '*', color: 'dim' };
   });
 
   const skyLines = cell.map((row) =>
-    row.map((color) => {
-      if (!color) return ' ';
-      if (color === 'star') return c('*', 'dim');
-      return c('█', color);
-    }).join('')
+    row.map((data) => (data ? c(data.ch, data.color) : ' ')).join('')
   );
 
   // The mascot, standing on the near ridge's ground line at the left.
