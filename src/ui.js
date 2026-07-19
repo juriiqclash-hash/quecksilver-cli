@@ -542,7 +542,7 @@ export function enableSlashCommandHighlight(rl, promptColored, knownCommands) {
 // moment it's an exact match, and reverts to plain the instant it isn't.
 export function readBoxedInput({ width, statusText, knownCommands = [] } = {}) {
   return new Promise((resolve) => {
-    let w = width || terminalWidth();
+    const w = width || terminalWidth();
     const placeholder = 'Try "/commands" to see what you can do';
     const known = new Set(knownCommands.map((k) => k.toLowerCase()));
     let buf = '';
@@ -608,37 +608,8 @@ export function readBoxedInput({ width, statusText, knownCommands = [] } = {}) {
     if (stdin.setRawMode) stdin.setRawMode(true);
     stdin.resume();
 
-    let resizeTimer = null;
-    // A live terminal resize invalidates all the row math above — the
-    // terminal itself may have reflowed already-printed lines, so "move up
-    // N rows" no longer lands where we think it does, and continuing to
-    // redraw at the old width just tears the box apart. Instead of trying
-    // to recover the old position, clear the visible screen and redraw the
-    // box from scratch at the new width — this can't fix already-printed
-    // content further up the scrollback (a plain scrolling terminal app has
-    // no way to reflow that after the fact — it's still there if you
-    // scroll up), but it stops the live input box itself from staying
-    // corrupted for the rest of the session.
-    //
-    // Dragging a window edge fires many 'resize' events in quick
-    // succession, one per intermediate size — redrawing on every single one
-    // is what produced a stack of duplicate boxes (rather than one clean
-    // redraw) whenever the window grew. Debouncing collapses that whole
-    // burst into a single redraw once the size has actually settled.
-    const onResize = () => {
-      if (resizeTimer) clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(() => {
-        w = terminalWidth();
-        process.stdout.write('\x1b[2J\x1b[H');
-        firstDraw = true;
-        draw();
-      }, 150);
-    };
-
     const cleanup = () => {
       stdin.removeListener('keypress', onKeypress);
-      process.stdout.removeListener('resize', onResize);
-      if (resizeTimer) clearTimeout(resizeTimer);
       if (stdin.setRawMode) stdin.setRawMode(wasRaw ?? false);
     };
 
@@ -669,7 +640,6 @@ export function readBoxedInput({ width, statusText, knownCommands = [] } = {}) {
 
     draw();
     stdin.on('keypress', onKeypress);
-    process.stdout.on('resize', onResize);
   });
 }
 
