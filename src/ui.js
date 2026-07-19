@@ -550,7 +550,7 @@ export function enableSlashCommandHighlight(rl, promptColored, knownCommands) {
 // `knownCommands` gets the same live blue highlight as the old
 // enableSlashCommandHighlight() did: the "/word" token turns blue the
 // moment it's an exact match, and reverts to plain the instant it isn't.
-export function readBoxedInput({ width, statusText, knownCommands = [] } = {}) {
+export function readBoxedInput({ width, statusText, knownCommands = [], resizeCoordinator } = {}) {
   return new Promise((resolve) => {
     // `w` used to be frozen for the life of the box, so resizing the
     // window (bigger or smaller) left it drawn at a stale width forever —
@@ -669,6 +669,24 @@ export function readBoxedInput({ width, statusText, knownCommands = [] } = {}) {
     const onResize = () => {
       w = terminalWidth();
       suppressEmptyEnterUntil = Date.now() + 300;
+      // If something above us (the welcome panel/logo, while it's still
+      // showing) already did a full clear + reprint for this exact resize
+      // event, the cursor is already sitting exactly where the box should
+      // start — cleaning up here too would fight over the same region and
+      // misalign things. Just draw fresh in that case.
+      if (resizeCoordinator && resizeCoordinator.justRedrew) {
+        resizeCoordinator.justRedrew = false;
+        firstDraw = true;
+        draw();
+        return;
+      }
+      // draw() always leaves the cursor parked one row below the box's own
+      // top rule (see the "go up 1" comment above) — so before wiping the
+      // box we need that same up-1 step first. Without it, only the input
+      // row downward gets cleared, and the box's original top rule is left
+      // behind, orphaned, while a full fresh box is drawn one row below it
+      // — exactly the stray extra divider line seen after a resize.
+      readline.moveCursor(process.stdout, 0, -1);
       readline.cursorTo(process.stdout, 0);
       readline.clearScreenDown(process.stdout);
       firstDraw = true;
