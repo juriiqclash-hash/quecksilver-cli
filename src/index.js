@@ -362,6 +362,28 @@ export function printCommandList() {
   });
 }
 
+// A handful of highlights from COMMAND_SECTIONS — not the full reference
+// (that's /commands), just enough to fill the gap between the welcome
+// panel and the bottom-anchored prompt with something useful to read.
+const QUICK_TIPS = [
+  ['/image <prompt>', 'Generate or edit an image'],
+  ['/search <query>', 'Force a web search'],
+  ['/doc <type> <topic>', 'Generate a docx/xlsx/pptx/pdf/markdown/csv'],
+  ['-c, --continue', 'Resume your last session'],
+];
+
+// Prints the quick-tips block and returns how many terminal lines it used,
+// so the caller can fold that into its running line count for padToBottom.
+function printQuickTips() {
+  console.log(c('Quick tips:', 'gray'));
+  const colWidth = Math.max(...QUICK_TIPS.map(([cmd]) => cmd.length)) + 2;
+  QUICK_TIPS.forEach(([cmd, desc]) => {
+    console.log(`  ${c(cmd.padEnd(colWidth), 'blue')}${c(desc, 'gray')}`);
+  });
+  console.log();
+  return QUICK_TIPS.length + 2;
+}
+
 // Directly invokes one tool server-side (bypasses Zora's own tool choice) —
 // backs the /search, /image, /doc and /music slash commands (and their
 // --search/--image/--doc/--music startup-flag equivalents). `files` carries
@@ -614,6 +636,14 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], u
   console.log(c('Type your message and press Enter to chat. Type "exit" to quit, or /commands to see everything else you can do.', 'gray'));
   console.log();
   lines += 2;
+
+  // Only worth showing if there's genuine room to spare — on a short
+  // terminal this would just eat into the space padToBottom needs to push
+  // the prompt down, which matters more than the tips do.
+  const tipsCost = QUICK_TIPS.length + 2;
+  if (process.stdout.isTTY && (process.stdout.rows || 24) - lines - tipsCost - 4 > 0) {
+    lines += printQuickTips();
+  }
 
   const promptText = c('you> ', 'steelBlue');
   const rl = readline.createInterface({
