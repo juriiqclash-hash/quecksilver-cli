@@ -77,12 +77,12 @@ export function twoColumnBox(leftLines, rightLines, { color = 'steelBlue', paddi
   if (title) {
     const label = ` ${title} `;
     const trailing = Math.max(1, leftInner - 1 - visibleLength(label));
-    top = c('┌─', color) + c(label, color) + c('─'.repeat(trailing), color)
-      + c(junction, color) + c('─'.repeat(rightInner), color) + c('┐', color);
+    top = c('╭─', color) + c(label, color) + c('─'.repeat(trailing), color)
+      + c(junction, color) + c('─'.repeat(rightInner), color) + c('╮', color);
   } else {
-    top = c('┌' + '─'.repeat(leftInner) + junction + '─'.repeat(rightInner) + '┐', color);
+    top = c('╭' + '─'.repeat(leftInner) + junction + '─'.repeat(rightInner) + '╮', color);
   }
-  const bottom = c('└' + '─'.repeat(leftInner) + bottomJunction + '─'.repeat(rightInner) + '┘', color);
+  const bottom = c('╰' + '─'.repeat(leftInner) + bottomJunction + '─'.repeat(rightInner) + '╯', color);
 
   const rows = [];
   for (let i = 0; i < height; i++) {
@@ -539,8 +539,16 @@ export function readBoxedInput({ width, statusText, knownCommands = [] } = {}) {
     };
 
     const draw = () => {
+      // After every draw, the cursor is always parked at the start of the
+      // input row (see the bottom of this function), never further down —
+      // so getting back up to the top rule to redraw always means going up
+      // exactly 1 row, no matter how many draws have already happened.
+      // Treating this as "go up 4" (the whole box height) was the bug: it
+      // walked the cursor further up than the box actually starts on every
+      // redraw after the first, so each keystroke drew a fresh copy of the
+      // box one row higher than the last instead of overwriting it in place.
       if (!firstDraw) {
-        readline.moveCursor(process.stdout, 0, -4);
+        readline.moveCursor(process.stdout, 0, -1);
         readline.cursorTo(process.stdout, 0);
       }
       firstDraw = false;
@@ -548,8 +556,9 @@ export function readBoxedInput({ width, statusText, knownCommands = [] } = {}) {
         readline.clearLine(process.stdout, 0);
         process.stdout.write(line + '\n');
       }
-      // Park the cursor right after the typed text (row 2 of the 4 just
-      // drawn), not trailing after the status line.
+      // The loop just printed 4 lines and is now one row past the status
+      // line — move back up 3 to land on the input row, then park the
+      // cursor right after the typed text (row 2 of the 4 just drawn).
       readline.moveCursor(process.stdout, 0, -3);
       readline.cursorTo(process.stdout, 2 + buf.length);
     };
