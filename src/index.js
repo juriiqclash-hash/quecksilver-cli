@@ -9,7 +9,7 @@ import {
 import { runLoginFlow } from './auth.js';
 import {
   c, mascot, logoArt, twoColumnBox, divider, terminalWidth, clearScreen, padToBottom,
-  centerBlock, visibleLength, startThinkingSpinner, openPath, enableSlashCommandHighlight,
+  centerBlock, visibleLength, startThinkingSpinner, openPath, readBoxedInput,
 } from './ui.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -20,9 +20,9 @@ const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 const ENDPOINT = `${SUPABASE_URL}/functions/v1/cli-chat`;
 const VERSION = pkg.version;
 
-// Every slash command recognized inside interactiveChat's rl.on('line', ...)
-// handler below — kept in one place so the live input-highlighting knows
-// exactly the same set of "valid" commands the handler itself checks for.
+// Every slash command recognized inside interactiveChat's input loop
+// below — kept in one place so the live input-highlighting knows exactly
+// the same set of "valid" commands the loop itself checks for.
 const KNOWN_SLASH_COMMANDS = [
   'file', 'attach', 'output', 'open', 'continue', 'config', 'usage',
   'commands', 'help', 'search', 'image', 'doc', 'music',
@@ -90,8 +90,9 @@ function printWelcomeBanner() {
   clearScreen();
   const width = terminalWidth({ min: 60, max: 110 });
   console.log();
+  console.log(centerBlock([c('Welcome to QueckSilver CLI', 'steelBlue') + c(' · ', 'gray') + c(`v${VERSION}`, 'gray')], width).join('\n'));
+  console.log();
   console.log(logoArt(width).join('\n'));
-  console.log(centerBlock([c(`v${VERSION}`, 'gray')], width).join('\n'));
   console.log();
 }
 
@@ -712,13 +713,7 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], u
     lines += printAboutSection();
   }
 
-  const promptText = c('you> ', 'steelBlue');
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    prompt: promptText,
-  });
-  enableSlashCommandHighlight(rl, promptText, KNOWN_SLASH_COMMANDS);
+  const STATUS_TEXT = 'QueckSilver CLI • Powered by Zora';
   const history = [...initialHistory];
   if (initialHistory.length > 0) {
     console.log(c(`Resumed previous session (${initialHistory.length / 2} turn(s)).`, 'gray'));
@@ -748,35 +743,22 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], u
     saveLastSession(history);
   };
 
-  // Frames the input with a horizontal rule above it (drawn here, right
-  // before the prompt appears) and another below it (drawn the moment the
-  // line is submitted, closing off what was just typed).
-  //
-  // A rule pre-drawn *below* the input before typing starts would be nicer,
-  // but Node's readline always redraws by moving to the start of its own
-  // render and clearing everything below (on prompt(), and again on every
-  // backspace) — it has no way to know a line we drew ourselves is there on
-  // purpose, so it gets wiped the moment the user edits the line. Tested
-  // this directly: the bottom rule survived the initial prompt() call but
-  // vanished on backspace, which is worse than not having it. Closing the
-  // box on submit instead is the reliable version of the same idea.
-  const promptNext = () => {
-    console.log(divider());
-    rl.prompt();
-  };
+  // Draws the input as a real box — rule, typed text, rule, status line —
+  // and resolves with whatever was typed. See readBoxedInput() in ui.js for
+  // why this replaced the old readline-based prompt.
+  const promptNext = () => readBoxedInput({ statusText: STATUS_TEXT, knownCommands: KNOWN_SLASH_COMMANDS });
 
   // Push the first prompt down to the terminal's bottom row instead of
   // leaving it stranded right under the welcome panel with a wall of
   // unused space below — only for this very first prompt; once the
   // conversation is scrolling, natural terminal flow takes over.
-  padToBottom(lines);
-  promptNext();
+  padToBottom(lines, { reserve: 4 });
 
-  rl.on('line', async (line) => {
-    console.log(divider());
+  while (true) {
+    const line = await promptNext();
     const text = line.trim();
-    if (!text) { promptNext(); return; }
-    if (text === 'exit' || text === 'quit') { rl.close(); return; }
+    if (!text) continue;
+    if (text === 'exit' || text === 'quit') break;
 
     const fileCmd = text.match(/^\/(?:file|attach)\s+(.+)$/i);
     if (fileCmd) {
@@ -788,23 +770,20 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], u
       } catch (err) {
         console.log(c(err.message, 'red'));
       }
-      promptNext();
-      return;
+      continue;
     }
 
     const outputCmd = text.match(/^\/output\s+(.+)$/i);
     if (outputCmd) {
       pendingOutput = stripQuotes(outputCmd[1]);
       console.log(c(`Your next reply will also be saved to ${pendingOutput}`, 'gray'));
-      promptNext();
-      return;
+      continue;
     }
 
     if (/^\/open$/i.test(text)) {
       sessionOpen = !sessionOpen;
       console.log(c(`Auto-open is now ${sessionOpen ? 'on' : 'off'} for this session.`, 'gray'));
-      promptNext();
-      return;
+      continue;
     }
 
     if (/^\/continue$/i.test(text)) {
@@ -815,8 +794,7 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], u
         history.unshift(...previous);
         console.log(c(`Loaded ${previous.length / 2} previous turn(s) into this conversation.`, 'gray'));
       }
-      promptNext();
-      return;
+      continue;
     }
 
     const configCmd = text.match(/^\/config(?:\s+set\s+(\S+)\s+(\S+))?$/i);
@@ -827,20 +805,17 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], u
       } else {
         printSettings(getAllSettings());
       }
-      promptNext();
-      return;
+      continue;
     }
 
     if (/^\/usage$/i.test(text)) {
       await printUsage(token);
-      promptNext();
-      return;
+      continue;
     }
 
     if (/^\/(?:commands|help)$/i.test(text)) {
       printCommandList();
-      promptNext();
-      return;
+      continue;
     }
 
     const searchCmd = text.match(/^\/search\s+(.+)$/i);
@@ -865,8 +840,7 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], u
       } catch (err) {
         console.error(c(`Connection error: ${err.message}`, 'red'));
       }
-      promptNext();
-      return;
+      continue;
     }
 
     try {
@@ -877,14 +851,10 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], u
     } catch (err) {
       console.error(c(`Connection error: ${err.message}`, 'red'));
     }
+  }
 
-    promptNext();
-  });
-
-  rl.on('close', () => {
-    console.log('\nSee you soon!');
-    process.exit(0);
-  });
+  console.log('\nSee you soon!');
+  process.exit(0);
 }
 
 // Shared "start a session" step: shows the account panel, then drops into
