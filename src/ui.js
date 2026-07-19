@@ -184,13 +184,13 @@ export function mascot({ bodyColor = 'steelBlue', eyeColor = 'eyeDark' } = {}) {
       const top = colorOf(topRow[col]);
       const bot = colorOf(botRow[col]);
       if (!top && !bot) {
-        line += '  ';
+        line += ' ';
       } else if (top && bot) {
-        line += `${colors[top]}${bgEscape(bot)}▀▀${RESET}`;
+        line += `${colors[top]}${bgEscape(bot)}▀${RESET}`;
       } else if (top) {
-        line += `${colors[top]}▀▀${RESET}`;
+        line += `${colors[top]}▀${RESET}`;
       } else {
-        line += `${colors[bot]}▄▄${RESET}`;
+        line += `${colors[bot]}▄${RESET}`;
       }
     }
     lines.push(line);
