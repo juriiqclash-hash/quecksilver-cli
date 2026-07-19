@@ -47,49 +47,47 @@ export function visibleLength(str) {
   return str.replace(/\x1b\[[0-9;]*m/g, '').length;
 }
 
-// Renders a bordered box around the given lines. With `title`, the top
-// border reads "┌─ title ────┐" instead of a plain rule.
-export function box(lines, { color = 'steelBlue', padding = 1, minWidth = 30, title } = {}) {
-  const contentWidth = Math.max(minWidth, ...lines.map(visibleLength), title ? visibleLength(title) + 2 : 0);
-  const innerWidth = contentWidth + padding * 2;
+// Renders a single bordered box split into two columns by one continuous
+// vertical rule (│, meeting the top/bottom borders at ┬/┴) — one rectangle,
+// not two separate boxes glued together, so a tall right column (like the
+// mountain motif) visibly stretches the same border the left column sits
+// in instead of floating outside it. With `title`, the top border reads
+// "┌─ title ─...─┬─...─┐" instead of a plain rule. `leftWidth`/`rightWidth`
+// are content widths (excluding padding/border); given explicitly they let
+// the caller guarantee the box never grows past a pre-computed budget.
+export function twoColumnBox(leftLines, rightLines, { color = 'steelBlue', padding = 1, title, leftWidth, rightWidth } = {}) {
+  const lw = leftWidth ?? Math.max(0, ...leftLines.map(visibleLength));
+  const rw = rightWidth ?? Math.max(0, ...rightLines.map(visibleLength));
   const pad = ' '.repeat(padding);
+  const leftInner = lw + padding * 2;
+  const rightInner = rw + padding * 2;
+  const height = Math.max(leftLines.length, rightLines.length);
 
   let top;
   if (title) {
     const label = ` ${title} `;
-    const trailing = Math.max(1, innerWidth - 1 - visibleLength(label));
-    top = c('┌─', color) + c(label, color) + c('─'.repeat(trailing), color) + c('┐', color);
+    const trailing = Math.max(1, leftInner - 1 - visibleLength(label));
+    top = c('┌─', color) + c(label, color) + c('─'.repeat(trailing), color)
+      + c('┬', color) + c('─'.repeat(rightInner), color) + c('┐', color);
   } else {
-    top = c('┌' + '─'.repeat(innerWidth) + '┐', color);
+    top = c('┌' + '─'.repeat(leftInner) + '┬' + '─'.repeat(rightInner) + '┐', color);
   }
-  const bottom = c('└' + '─'.repeat(innerWidth) + '┘', color);
-
-  const body = lines.map((line) => {
-    const visLen = visibleLength(line);
-    const rightPad = ' '.repeat(Math.max(0, contentWidth - visLen));
-    return c('│', color) + pad + line + rightPad + pad + c('│', color);
-  });
-
-  return [top, ...body, bottom].join('\n');
-}
-
-// Places two multi-line blocks side by side with a gap between them —
-// used to lay the welcome panel's stats box and the mountain motif out as
-// two columns, like Claude Code's own startup screen.
-export function sideBySide(leftBlock, rightBlock, gap = 2) {
-  const leftLines = leftBlock.split('\n');
-  const rightLines = rightBlock.split('\n');
-  const leftWidth = Math.max(...leftLines.map(visibleLength));
-  const height = Math.max(leftLines.length, rightLines.length);
-  const gapStr = ' '.repeat(gap);
+  const bottom = c('└' + '─'.repeat(leftInner) + '┴' + '─'.repeat(rightInner) + '┘', color);
 
   const rows = [];
   for (let i = 0; i < height; i++) {
-    const left = leftLines[i] ?? '';
-    const right = rightLines[i] ?? '';
-    rows.push(left + ' '.repeat(Math.max(0, leftWidth - visibleLength(left))) + gapStr + right);
+    const l = leftLines[i] ?? '';
+    const r = rightLines[i] ?? '';
+    const lPad = ' '.repeat(Math.max(0, lw - visibleLength(l)));
+    const rPad = ' '.repeat(Math.max(0, rw - visibleLength(r)));
+    rows.push(
+      c('│', color) + pad + l + lPad + pad
+        + c('│', color) + pad + r + rPad + pad
+        + c('│', color)
+    );
   }
-  return rows.join('\n');
+
+  return [top, ...rows, bottom].join('\n');
 }
 
 // The real terminal width, clamped to a sane range so the layout never
@@ -176,10 +174,12 @@ function ridgeHeights(width, { base, amp, freq, phase, octaves = 3 }) {
 // A mountain-landscape backdrop for the mascot: three overlapping ridgelines
 // receding into the distance (lightest/hazy far range down to a dark near
 // range), scattered stars in the open sky, framed top and bottom by a
-// dotted horizon line, with the Zora mascot standing on the near ridge at
-// the left. Rows come back pre-colored and padded to `width` visible
-// columns, ready to drop into a full-width splash or a welcome-panel column.
-export function mountainScene(width = 60, { skyRows = 9 } = {}) {
+// dotted horizon line (unless `border: false`, for when it's embedded as a
+// column inside a bordered box that already draws its own edges), with the
+// Zora mascot standing on the near ridge at the left. Rows come back
+// pre-colored and padded to `width` visible columns, ready to drop into a
+// full-width splash or a welcome-panel column.
+export function mountainScene(width = 60, { skyRows = 9, border = true } = {}) {
   const w = Math.max(22, width);
   const mascotRows = MASCOT_GRID.length;
 
@@ -248,8 +248,10 @@ export function mountainScene(width = 60, { skyRows = 9 } = {}) {
     row.map((ch, ci) => (ch === ' ' ? ' ' : c(ch, mascotPaint[r][ci]))).join('')
   );
 
-  const border = c('.'.repeat(w), 'dim');
-  return [border, ...skyLines, ...mascotLines, border];
+  const lines = [...skyLines, ...mascotLines];
+  if (!border) return lines;
+  const dots = c('.'.repeat(w), 'dim');
+  return [dots, ...lines, dots];
 }
 
 // A grab-bag of playful "thinking" verbs, shown at random while waiting on

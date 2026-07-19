@@ -8,7 +8,7 @@ import {
 } from './config.js';
 import { runLoginFlow } from './auth.js';
 import {
-  c, box, mascot, mountainScene, sideBySide, divider, terminalWidth, clearScreen,
+  c, mascot, mountainScene, twoColumnBox, divider, terminalWidth, clearScreen,
   startThinkingSpinner, openPath, enableSlashCommandHighlight,
 } from './ui.js';
 
@@ -104,13 +104,15 @@ function fitPath(path, maxLen) {
   return '…' + path.slice(path.length - (maxLen - 1));
 }
 
-// The logged-in welcome panel: a wide, short stats box (mascot, greeting,
-// model/plan/version and email/dir on two combined lines) on the left, the
-// mountain motif filling the rest of the terminal's width on the right —
-// shown once per session start instead of the splash above. Left width is
-// derived from the (fixed-ish) stat text itself rather than guessed as a
-// percentage of the terminal, so it can never grow past its slot and steal
-// space back from the motif on narrow terminals.
+// The logged-in welcome panel: one continuous bordered rectangle split by a
+// single vertical rule — stats (mascot, greeting, model/plan/version,
+// email/dir) on the left, the mountain motif continuing into the same
+// rectangle's free space on the right — shown once per session start
+// instead of the splash above. Left width is derived from the (fixed-ish)
+// stat text itself rather than guessed as a percentage of the terminal, so
+// it can never grow past its slot and steal space back from the motif on
+// narrow terminals; right width is whatever's left, which is exactly what
+// twoColumnBox is told to draw, so the box can never overflow either.
 function printWelcomePanel({ email, isPro }) {
   clearScreen();
   const plan = isPro ? 'Pro' : 'Free';
@@ -118,19 +120,19 @@ function printWelcomePanel({ email, isPro }) {
   const name = rawName.charAt(0).toUpperCase() + rawName.slice(1);
 
   const total = terminalWidth({ min: 80, max: 140 });
-  const gap = 3;
+  // Non-content characters twoColumnBox always draws: left border + left
+  // padding*2 + divider + right padding*2 + right border = 1+2+1+2+1.
+  const structureOverhead = 7;
+  const rightMinContent = 22;
   const statLine1Plain = `Model: Zora 6.1 · Plan: ${plan} · Version: v${VERSION}`;
-  // The box is sized to exactly fit statLine1 (its longest fixed-length
-  // line) — never wider than that unless the terminal has generous room to
-  // spare, and never narrower, so box() can't silently grow past what this
-  // math accounted for and steal space back from the motif.
-  const minLeftForContent = statLine1Plain.length + 4;
-  const leftWidth = Math.max(minLeftForContent, Math.min(60, total - gap - 22));
-  const rightWidth = Math.max(22, total - leftWidth - gap);
-  const contentWidth = leftWidth - 4;
+  const leftContentWidth = Math.max(
+    statLine1Plain.length,
+    Math.min(56, total - structureOverhead - rightMinContent),
+  );
+  const rightContentWidth = total - structureOverhead - leftContentWidth;
 
   const dirPrefix = `Email: ${email} · Dir: `;
-  const dirDisplay = fitPath(process.cwd(), Math.max(8, contentWidth - dirPrefix.length));
+  const dirDisplay = fitPath(process.cwd(), Math.max(8, leftContentWidth - dirPrefix.length));
 
   const leftLines = [
     '', // breathing room between the "QueckSilver CLI" title and the mascot
@@ -142,11 +144,12 @@ function printWelcomePanel({ email, isPro }) {
       + c('Version: ', 'gray') + `v${VERSION}`,
     c('Email: ', 'gray') + email + c(' · ', 'gray') + c('Dir: ', 'gray') + dirDisplay,
   ];
+  const rightLines = mountainScene(rightContentWidth, { border: false });
 
-  const leftBox = box(leftLines, { color: 'steelBlue', minWidth: contentWidth, title: 'QueckSilver CLI' });
-  const rightMotif = mountainScene(rightWidth).join('\n');
-
-  console.log(sideBySide(leftBox, rightMotif, gap));
+  console.log(twoColumnBox(leftLines, rightLines, {
+    color: 'steelBlue', title: 'QueckSilver CLI',
+    leftWidth: leftContentWidth, rightWidth: rightContentWidth,
+  }));
   console.log();
 }
 
@@ -638,8 +641,16 @@ async function interactiveChat(token, { files = [], open, initialHistory = [] } 
 
   // Frames the input with a horizontal rule above it (drawn here, right
   // before the prompt appears) and another below it (drawn the moment the
-  // line is submitted, closing off what was just typed) — a real boxed
-  // input line in an otherwise append-only terminal.
+  // line is submitted, closing off what was just typed).
+  //
+  // A rule pre-drawn *below* the input before typing starts would be nicer,
+  // but Node's readline always redraws by moving to the start of its own
+  // render and clearing everything below (on prompt(), and again on every
+  // backspace) — it has no way to know a line we drew ourselves is there on
+  // purpose, so it gets wiped the moment the user edits the line. Tested
+  // this directly: the bottom rule survived the initial prompt() call but
+  // vanished on backspace, which is worse than not having it. Closing the
+  // box on submit instead is the reliable version of the same idea.
   const promptNext = () => {
     console.log(divider());
     rl.prompt();
