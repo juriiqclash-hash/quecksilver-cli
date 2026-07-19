@@ -184,6 +184,22 @@ function rgbColor(rgb) {
   return `${ESC}38;2;${rgb[0]};${rgb[1]};${rgb[2]}m`;
 }
 
+// The source capture's own blurry baked-in mascot sits inside this source
+// pixel box (rows/cols 5-70 x 41-69 of the 420x70 grid) — found by
+// scanning for the bluish tint that doesn't belong to the grayscale
+// terrain. Only sampleBox() boxes that actually overlap this region carry
+// any of that blur; everything else is untouched, real mountain data.
+const MASCOT_SOURCE_BOX = { x0: 5, x1: 70, y0: 41, y1: 69 };
+
+function overlapsMascotSource(px, py, wOut, hOut) {
+  const x0 = Math.floor((px / wOut) * MOUNTAIN_GRID_W);
+  const x1 = Math.max(x0 + 1, Math.floor(((px + 1) / wOut) * MOUNTAIN_GRID_W));
+  const y0 = Math.floor((py / hOut) * MOUNTAIN_GRID_H);
+  const y1 = Math.max(y0 + 1, Math.floor(((py + 1) / hOut) * MOUNTAIN_GRID_H));
+  return x0 < MASCOT_SOURCE_BOX.x1 && x1 > MASCOT_SOURCE_BOX.x0
+    && y0 < MASCOT_SOURCE_BOX.y1 && y1 > MASCOT_SOURCE_BOX.y0;
+}
+
 // A fixed, curated set of star positions (fractions of scene width/height,
 // so they scale to any terminal size), drawn as a plain small `*` glyph
 // rather than a filled block — real stars in a terminal font read as tiny
@@ -241,15 +257,20 @@ export function mountainScene(width = 60, { skyRows = 9, border = true } = {}) {
     Array.from({ length: w }, (_, px) => sampleBox(buf, px, py, w, rows))
   );
 
-  // The source capture's own mascot (baked in around the same spot ours
-  // goes) is blurry, so nothing from the terrain sample is trusted in its
-  // footprint — blank it to plain black before anything else touches this
-  // area, so every cell our own mascot doesn't opaquely cover (its few
-  // empty corner/gap cells) shows clean black instead of a blurry bleed.
+  // Only the cells whose sample box actually overlaps the source's blurry
+  // baked-in mascot (see MASCOT_SOURCE_BOX) get touched — everything
+  // beside it, left or right, is real untouched mountain data. Each
+  // contaminated cell extends its own column's last clean row from just
+  // above the mascot band straight down, so the ridge visibly continues
+  // behind/around our own mascot instead of a flat blanked rectangle.
   const mascotTop = rows - mascotRows;
-  const mascotBoxRight = Math.min(w, 2 + MASCOT_GRID[0].length * 2);
-  for (let r = mascotTop; r < rows; r++) {
-    for (let x = 0; x < mascotBoxRight; x++) pixels[r][x] = [0, 0, 0];
+  for (let x = 0; x < w; x++) {
+    let cleanRow = mascotTop - 1;
+    while (cleanRow >= 0 && overlapsMascotSource(x, cleanRow, w, rows)) cleanRow--;
+    const fill = cleanRow >= 0 ? pixels[cleanRow][x] : [0, 0, 0];
+    for (let r = mascotTop; r < rows; r++) {
+      if (overlapsMascotSource(x, r, w, rows)) pixels[r][x] = fill;
+    }
   }
 
   const starCells = placeStars(pixels, w, rows);
