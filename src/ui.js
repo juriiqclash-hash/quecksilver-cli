@@ -147,12 +147,11 @@ export function mascot({ bodyColor = 'steelBlue', eyeColor = 'eyeDark' } = {}) {
   ).join('\n');
 }
 
-// The mountain backdrop is not procedurally generated — it's a real 24-bit
-// RGB render of the reference artwork, baked into src/mountain-data.js
-// (420x140, row-major, base64) and reproduced here with Unicode upper-half
-// blocks (▀): true-color foreground = top pixel, background = bottom
-// pixel, doubling vertical resolution per character row. Same technique
-// tools like `chafa` use to turn a real image into terminal art.
+// The mountain ridge itself is not procedurally generated — it's a real
+// 24-bit RGB render of the reference artwork, baked into
+// src/mountain-data.js (420x43, row-major, base64), cropped down to just
+// the sky+ridge band. The mascot and the stars are drawn on top by this
+// file instead of taken from the source image (see below).
 let _mountainRGB = null;
 function mountainRGB() {
   if (!_mountainRGB) _mountainRGB = Buffer.from(MOUNTAIN_GRID_B64, 'base64');
@@ -185,11 +184,28 @@ function rgbColor(rgb) {
   return `${ESC}38;2;${rgb[0]};${rgb[1]};${rgb[2]}m`;
 }
 
-// A mountain-landscape backdrop for the mascot, reproducing the reference
-// artwork's actual skyline/shading (see mountainRGB above) rather than an
-// algorithmic approximation. Framed top and bottom by a dotted horizon
-// line (unless `border: false`, for when it's embedded as a column inside
-// a bordered box that already draws its own edges), with the Zora mascot
+// A fixed, curated set of star positions (fractions of scene width/height,
+// so they scale to any terminal size) drawn on top of the baked ridge —
+// deliberately NOT per-cell random noise (that produced visible "TV
+// static" in an earlier pass), just a small handful of individual points.
+// Each is only drawn where the sampled terrain pixel underneath is dark
+// enough to read as sky, so a star never overpaints a bright mountain peak.
+const STAR_POSITIONS = [
+  [0.04, 0.05], [0.11, 0.2], [0.18, 0.05], [0.27, 0.28],
+  [0.35, 0.1], [0.44, 0.2], [0.52, 0.05], [0.6, 0.24],
+  [0.68, 0.1], [0.76, 0.3], [0.83, 0.05], [0.91, 0.2],
+  [0.14, 0.4], [0.58, 0.38], [0.8, 0.42], [0.3, 0.42],
+];
+const STAR_COLOR = [235, 235, 240];
+const STAR_DIM_COLOR = [150, 150, 158];
+
+// A mountain-landscape backdrop for the mascot: the ridge/sky shading comes
+// from the baked reference render (see mountainRGB above), while the
+// mascot and the stars are drawn fresh by this function — the source
+// capture's own mascot was blurry and its stars weren't ours to control,
+// so neither is reused. Framed top and bottom by a dotted horizon line
+// (unless `border: false`, for when it's embedded as a column inside a
+// bordered box that already draws its own edges), with the Zora mascot
 // standing at the left in the CLI's own brand color, drawn over the baked
 // terrain. Rows come back pre-colored and padded to `width` visible
 // columns, ready to drop into a full-width splash or a welcome-panel column.
@@ -202,6 +218,15 @@ export function mountainScene(width = 60, { skyRows = 9, border = true } = {}) {
   const pixels = Array.from({ length: rows }, (_, py) =>
     Array.from({ length: w }, (_, px) => sampleBox(buf, px, py, w, rows))
   );
+
+  STAR_POSITIONS.forEach(([xFrac, yFrac], i) => {
+    const px = Math.min(w - 1, Math.round(xFrac * (w - 1)));
+    const py = Math.min(rows - 1, Math.round(yFrac * (rows - 1)));
+    const [r, g, b] = pixels[py][px];
+    if (r < 30 && g < 30 && b < 30) {
+      pixels[py][px] = i % 3 === 0 ? STAR_DIM_COLOR : STAR_COLOR;
+    }
+  });
 
   // The mascot overlays the terrain on the bottom `mascotRows` character
   // rows, at the left — only its own non-empty cells replace what's
