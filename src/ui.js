@@ -185,32 +185,40 @@ function rgbColor(rgb) {
 }
 
 // A fixed, curated set of star positions (fractions of scene width/height,
-// so they scale to any terminal size) drawn on top of the baked ridge —
-// deliberately NOT per-cell random noise (that produced visible "TV
-// static" in an earlier pass), just a small handful of individual points.
-// Each is only drawn where the sampled terrain pixel underneath is dark
-// enough to read as sky, so a star never overpaints a bright mountain peak.
+// so they scale to any terminal size), drawn as a plain small `*` glyph
+// rather than a filled block — real stars in a terminal font read as tiny
+// marks, not solid squares. Deliberately NOT per-cell random noise either
+// (that produced visible "TV static" in an earlier pass).
 const STAR_POSITIONS = [
-  [0.04, 0.05], [0.16, 0.22], [0.28, 0.06], [0.4, 0.28],
-  [0.52, 0.08], [0.64, 0.24], [0.76, 0.06], [0.88, 0.22],
-  [0.2, 0.4], [0.6, 0.4],
+  [0.04, 0.1], [0.16, 0.22], [0.28, 0.08], [0.4, 0.25],
+  [0.52, 0.12], [0.64, 0.22], [0.76, 0.08], [0.88, 0.2],
 ];
-const STAR_COLOR = [235, 235, 240];
-const STAR_ARM_COLOR = [140, 140, 148];
+const STAR_COLOR = 'gray';
 
-// Draws a small four-point sparkle (a "+" of one bright center cell and
-// four dimmer arm cells) instead of a single flat dot, so stars actually
-// read as stars rather than plain squares.
-function drawStar(pixels, w, rows, px, py) {
-  const [r, g, b] = pixels[py][px];
-  if (r >= 30 || g >= 30 || b >= 30) return;
-  pixels[py][px] = STAR_COLOR;
-  for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
-    const nx = px + dx, ny = py + dy;
-    if (nx < 0 || nx >= w || ny < 0 || ny >= rows) continue;
-    const [nr, ng, nb] = pixels[ny][nx];
-    if (nr < 30 && ng < 30 && nb < 30) pixels[ny][nx] = STAR_ARM_COLOR;
-  }
+// A set of "row,col" keys marking cells to render as a small `*` glyph
+// instead of a terrain-colored block. A star only survives if its own
+// cell AND its 4 neighbors all sample dark — checking just the center
+// pixel let one star land in a dark notch between two bright peaks in an
+// earlier pass, reading as "sitting on the mountain"; requiring the whole
+// neighborhood to be dark keeps stars clear of ridge edges entirely.
+function placeStars(pixels, w, rows) {
+  const cells = new Set();
+  const isDark = (py, px) => {
+    const [r, g, b] = pixels[py][px];
+    return r < 40 && g < 40 && b < 40;
+  };
+  STAR_POSITIONS.forEach(([xFrac, yFrac]) => {
+    const px = Math.min(w - 1, Math.round(xFrac * (w - 1)));
+    const py = Math.min(rows - 1, Math.round(yFrac * (rows - 1)));
+    const neighbors = [[0, 0], [-1, 0], [1, 0], [0, -1], [0, 1]];
+    const clear = neighbors.every(([dy, dx]) => {
+      const ny = py + dy, nx = px + dx;
+      if (ny < 0 || ny >= rows || nx < 0 || nx >= w) return true;
+      return isDark(ny, nx);
+    });
+    if (clear) cells.add(`${py},${px}`);
+  });
+  return cells;
 }
 
 // A mountain-landscape backdrop for the mascot: the ridge/sky shading comes
@@ -233,16 +241,22 @@ export function mountainScene(width = 60, { skyRows = 9, border = true } = {}) {
     Array.from({ length: w }, (_, px) => sampleBox(buf, px, py, w, rows))
   );
 
-  STAR_POSITIONS.forEach(([xFrac, yFrac]) => {
-    const px = Math.min(w - 1, Math.round(xFrac * (w - 1)));
-    const py = Math.min(rows - 1, Math.round(yFrac * (rows - 1)));
-    drawStar(pixels, w, rows, px, py);
-  });
+  // The source capture's own mascot (baked in around the same spot ours
+  // goes) is blurry, so nothing from the terrain sample is trusted in its
+  // footprint — blank it to plain black before anything else touches this
+  // area, so every cell our own mascot doesn't opaquely cover (its few
+  // empty corner/gap cells) shows clean black instead of a blurry bleed.
+  const mascotTop = rows - mascotRows;
+  const mascotBoxRight = Math.min(w, 2 + MASCOT_GRID[0].length * 2);
+  for (let r = mascotTop; r < rows; r++) {
+    for (let x = 0; x < mascotBoxRight; x++) pixels[r][x] = [0, 0, 0];
+  }
+
+  const starCells = placeStars(pixels, w, rows);
 
   // The mascot overlays the terrain on the bottom `mascotRows` character
   // rows, at the left — only its own non-empty cells replace what's
   // underneath, so the baked terrain stays visible behind/around it.
-  const mascotTop = rows - mascotRows;
   const mascotCell = Array.from({ length: rows }, () => Array(w).fill(null));
   MASCOT_GRID.forEach((row, ri) => {
     row.forEach((cellValue, ci) => {
@@ -261,7 +275,13 @@ export function mountainScene(width = 60, { skyRows = 9, border = true } = {}) {
     let line = '';
     for (let x = 0; x < w; x++) {
       const mColor = mascotCell[r][x];
-      line += mColor ? c('█', mColor) : rgbColor(pixelRow[x]) + '█' + RESET;
+      if (mColor) {
+        line += c('█', mColor);
+      } else if (starCells.has(`${r},${x}`)) {
+        line += c('*', STAR_COLOR);
+      } else {
+        line += rgbColor(pixelRow[x]) + '█' + RESET;
+      }
     }
     lines.push(line);
   }
