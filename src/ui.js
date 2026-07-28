@@ -724,32 +724,36 @@ export function enableSlashCommandHighlight(rl, promptColored, knownCommands) {
 // ---- Fixed-bottom chat dock ---------------------------------------------
 //
 // A permanent input box pinned to the terminal's last `FOOTER_ROWS` rows,
-// with conversation text growing into the region above it. Two problems
-// a first pass at this (plain DECSTBM scroll region, one Promise per turn)
-// ran into, and how this version avoids them:
+// with the conversation above it fully scrollable. Two problems earlier
+// passes at this ran into, and how this version avoids them:
 //
-// 1. A VT100 scroll region only constrains *program-driven* scrolling
-//    (newlines). It does nothing to a terminal's own mouse-wheel/scrollbar
-//    scrollback — that's just replaying past frames of the *whole* screen,
-//    footer rows included, so scrolling up visibly dragged the box along
-//    with the conversation. The only way to keep the box's row numbers
-//    truly exempt from that is to leave the primary screen's scrollback
-//    out of the picture entirely: the dock switches to the alternate
-//    screen buffer (the same mechanism vim/htop/tmux use), which has no
-//    native scrollback to drag the footer through.
+// 1. A plain VT100 scroll region (DECSTBM) only constrains *program-driven*
+//    scrolling (newlines). It does nothing to a terminal's own mouse-wheel
+//    /scrollbar scrollback — that's just replaying past frames of the
+//    *whole* screen, footer rows included, so scrolling up visibly dragged
+//    the box along with the conversation. Leaving the primary screen's
+//    native scrollback out of the picture (switching to the alternate
+//    screen buffer, same as vim/htop/tmux) fixes the box-dragging, but on
+//    its own it also throws away any way to scroll back through history at
+//    all. This version keeps its own scrollback instead: every printed
+//    line is kept in `contentLines`, and the content viewport (rows
+//    1..regionBottom) is redrawn from a window into that array — live at
+//    the tail by default, moved back by PageUp/PageDown or the arrow keys
+//    (which is what most terminals actually send for mouse-wheel scroll
+//    while an alt-screen app hasn't requested real mouse reporting). The
+//    footer is never part of that array, so it can never be scrolled.
 // 2. Re-installing raw mode and a fresh keypress listener on every single
-//    turn (the old `input()`, called once per message) left a window
-//    between turns — while a reply was streaming in — where raw mode had
-//    been restored to whatever it was *before* chatting started (usually
-//    off). Anything typed during that window got echoed straight to the
-//    terminal by the OS's own cooked-mode line editing instead of by this
-//    code, landing wherever the cursor happened to be, and got flushed as
-//    a buffered burst (sometimes read as a stray Enter) the moment the
-//    next turn's listener came up — the "types show up somewhere weird,
-//    then several replies fire at once" bug. The fix is to install raw
-//    mode and the keypress listener exactly once, for the dock's entire
-//    lifetime: typing is always captured live, always redrawn into the
-//    box, and Enter only resolves a turn when one is actually pending
+//    turn (an early version's `input()`, called once per message) left a
+//    window between turns — while a reply was streaming in — where raw
+//    mode had been restored to whatever it was *before* chatting started
+//    (usually off). Anything typed during that window got echoed straight
+//    to the terminal by the OS's own cooked-mode line editing instead of
+//    by this code, landing wherever the cursor happened to be, then got
+//    flushed as a garbled burst (sometimes read as a stray Enter) the
+//    moment the next turn's listener came up. Raw mode and the keypress
+//    listener are now installed exactly once, for the dock's entire
+//    lifetime: typing is always captured live and redrawn into the box,
+//    and Enter only resolves a turn when one is actually pending
 //    (`pendingResolve` set) — while a reply is in flight there's nothing
 //    pending, so Enter is simply swallowed and whatever was typed just
 //    keeps sitting in the box, exactly as-is, until the next turn opens.
@@ -757,33 +761,26 @@ const FOOTER_ROWS = 4;
 const ENTER_ALT_SCREEN = `${ESC}?1049h`;
 const LEAVE_ALT_SCREEN = `${ESC}?1049l`;
 
-function setScrollRegion(top, bottom) {
-  process.stdout.write(`${ESC}${top};${bottom}r`);
-}
-function resetScrollRegion() {
-  process.stdout.write(`${ESC}r`);
-}
 function moveTo(row, col = 1) {
   process.stdout.write(`${ESC}${row};${col}H`);
 }
 
 export function createChatDock() {
-  let rows = process.stdout.rows || 24;
-  let regionBottom = Math.max(1, rows - FOOTER_ROWS);
+  let regionBottom = Math.max(1, (process.stdout.rows || 24) - FOOTER_ROWS); // content viewport = rows 1..regionBottom
   let active = false; // alternate screen entered, raw mode + listeners live
-  let engaged = false; // engage() has run: scroll region set, footer has real geometry
+  let engaged = false; // engage() has run: geometry is real, footer has content to show
   let exitHookInstalled = false;
-  let nextRow = 1;
+  let contentLines = []; // the dock's own scrollback — every committed line, oldest first
+  let stagingLine = null; // an uncommitted trailing line (the spinner) shown appended after contentLines, replaced wholesale on every tick instead of growing the real log
+  let scrollOffset = 0; // lines back from the live tail; 0 = pinned to the latest content
   let buf = '';
   let pendingResolve = null;
   let statusText = '';
   let known = new Set();
   let wasRaw = false;
 
-  const applyRegion = () => {
-    rows = process.stdout.rows || 24;
-    regionBottom = Math.max(1, rows - FOOTER_ROWS);
-    setScrollRegion(1, regionBottom);
+  const applyGeometry = () => {
+    regionBottom = Math.max(1, (process.stdout.rows || 24) - FOOTER_ROWS);
   };
 
   const placeholder = 'Try "/commands" to see what you can do';
@@ -811,8 +808,35 @@ export function createChatDock() {
     moveTo(top + 1, 3 + buf.length);
   };
 
+  // Redraws the whole content viewport from whatever `regionBottom` lines
+  // of contentLines (plus the ephemeral staging line, if any) the current
+  // scroll offset points at, then always finishes by parking the cursor
+  // back in the input box — every content change goes through this, so
+  // the blinking cursor never drifts up into the content area the way it
+  // did when only the box's own keystroke handler bothered to reposition it.
+  const redrawContent = () => {
+    if (!engaged) return;
+    const all = stagingLine !== null ? contentLines.concat([stagingLine]) : contentLines;
+    const h = regionBottom;
+    const maxOffset = Math.max(0, all.length - h);
+    if (scrollOffset > maxOffset) scrollOffset = maxOffset;
+    const start = Math.max(0, all.length - h - scrollOffset);
+    for (let i = 0; i < h; i++) {
+      moveTo(i + 1, 1);
+      readline.clearLine(process.stdout, 0);
+      process.stdout.write(all[start + i] ?? '');
+    }
+    drawFooter();
+  };
+
+  // delta > 0 reveals older lines (scroll up / PageUp), delta < 0 moves
+  // back toward the live tail (scroll down / PageDown) — clamped above.
+  const scrollBy = (delta) => {
+    scrollOffset = Math.max(0, scrollOffset + delta);
+    redrawContent();
+  };
+
   const leaveScreen = () => {
-    resetScrollRegion();
     process.stdout.write(LEAVE_ALT_SCREEN);
     if (process.stdin.setRawMode) process.stdin.setRawMode(wasRaw ?? false);
   };
@@ -825,6 +849,10 @@ export function createChatDock() {
       process.exit(0);
       return;
     }
+    if (key && key.name === 'pageup') { scrollBy(Math.max(1, regionBottom - 1)); return; }
+    if (key && key.name === 'pagedown') { scrollBy(-Math.max(1, regionBottom - 1)); return; }
+    if (key && key.name === 'up') { scrollBy(1); return; }
+    if (key && key.name === 'down') { scrollBy(-1); return; }
     if (key && (key.name === 'return' || key.name === 'enter')) {
       // No turn is currently pending — either still on the welcome screen
       // before engage(), or a reply is actively streaming in. Either way,
@@ -852,12 +880,8 @@ export function createChatDock() {
 
   const onResize = () => {
     if (!engaged) return;
-    // A physical resize resets most terminals' scroll region back to
-    // full-screen, so both the region and the box's own row numbers need
-    // recomputing from the new size before the footer redraws at its new
-    // bottom-row position.
-    applyRegion();
-    drawFooter();
+    applyGeometry();
+    redrawContent();
   };
 
   const dock = {
@@ -884,19 +908,17 @@ export function createChatDock() {
         process.once('exit', () => { if (active) leaveScreen(); });
       }
     },
-    // Call once the welcome panel + intro have been printed fresh into the
-    // blank alternate screen start() just switched to — computes the
-    // scroll region from the current terminal size, remembers `nextRow`
-    // (the row right after everything already printed) as where the very
-    // first turn's content should begin, and draws the initial footer.
-    engage({ nextRow: startRow = 1, statusText: st = '', knownCommands = [] } = {}) {
+    // Call once, right after start() — computes the content/footer split
+    // from the current terminal size and draws the (still-empty) footer.
+    // The welcome panel/intro print through print() below afterward, same
+    // as any other content, instead of being seeded in some special way.
+    engage({ statusText: st = '', knownCommands = [] } = {}) {
       if (!active) return;
       engaged = true;
-      nextRow = startRow;
       statusText = st;
       known = new Set(knownCommands.map((k) => k.toLowerCase()));
-      applyRegion();
-      drawFooter();
+      applyGeometry();
+      redrawContent();
     },
     stop() {
       if (!active) return;
@@ -906,38 +928,68 @@ export function createChatDock() {
       process.stdout.removeListener('resize', onResize);
       leaveScreen();
     },
-    // Wipes rows [row, regionBottom] — i.e. everything in the scrolling
-    // region from `row` down to its own bottom edge — without touching
-    // the reserved footer rows below it, and resets nextRow to `row` so
-    // whatever prints next lands starting exactly there. Used to clear a
-    // specific onboarding block (the "Type your message..." hint) once
-    // real chatting starts, so the first turn's echo appears immediately
-    // under the welcome panel instead of down at the region's bottom edge.
-    clearFrom(row) {
-      if (!engaged) return;
-      for (let r = row; r <= regionBottom; r++) {
-        moveTo(r, 1);
-        readline.clearLine(process.stdout, 0);
-      }
-      nextRow = row;
+    // The content buffer's current length — pairs with truncateTo() to cut
+    // a specific block (the "Type your message..." onboarding hint) back
+    // out once real chatting starts, without touching anything printed
+    // before it (the welcome panel) or the footer, which was never part
+    // of this buffer to begin with.
+    mark() {
+      return contentLines.length;
     },
-    // Prints a (possibly multi-line) block into the scrolling region.
-    // Content grows downward line by line from `nextRow` while there's
-    // still room — matching how the panel/intro above it were printed, so
-    // the first turn continues directly underneath with no gap — and only
-    // starts scrolling (each line ending in its own newline, so DECSTBM
-    // pushes the region up exactly like a normal terminal scrolling a full
-    // screen) once it actually reaches the region's bottom edge.
+    truncateTo(n) {
+      if (!engaged) return;
+      contentLines.length = Math.max(0, n);
+      scrollOffset = 0;
+      redrawContent();
+    },
+    // Commits a (possibly multi-line) block to the end of the scrollback,
+    // snaps the view back to the live tail (matching how every real chat
+    // UI auto-scrolls on new content), and redraws.
     print(text = '') {
       if (!engaged) { console.log(text); return; }
-      String(text).split('\n').forEach((line) => {
-        const row = Math.min(nextRow, regionBottom);
-        moveTo(row, 1);
-        readline.clearLine(process.stdout, 0);
-        process.stdout.write(line);
-        if (row >= regionBottom) process.stdout.write('\n');
-        nextRow = row + 1;
-      });
+      stagingLine = null;
+      String(text).split('\n').forEach((line) => contentLines.push(line));
+      scrollOffset = 0;
+      redrawContent();
+    },
+    // Shows `text` as an uncommitted trailing line — appended after
+    // whatever's already committed, replaced wholesale on every call
+    // instead of growing the real log. Built for the spinner (see
+    // spinner() below): each tick just re-stages its current frame.
+    setEphemeral(text) {
+      if (!engaged) return;
+      stagingLine = text;
+      redrawContent();
+    },
+    clearEphemeral() {
+      if (!engaged || stagingLine === null) return;
+      stagingLine = null;
+      redrawContent();
+    },
+    // A startThinkingSpinner()-alike that renders through the dock's own
+    // ephemeral line instead of a raw \r-based terminal write — the raw
+    // version assumes it owns "the current line" outright, which doesn't
+    // hold here now that content is a full redrawn viewport rather than
+    // one growing tail. Same "<spinner> <word>… (Ns)" look and the same
+    // .stop(finalNote?) shape, so call sites can take either interchangeably.
+    spinner() {
+      const word = THINKING_WORDS[Math.floor(Math.random() * THINKING_WORDS.length)];
+      const start = Date.now();
+      let frame = 0;
+      const tick = () => {
+        const elapsed = Math.floor((Date.now() - start) / 1000);
+        const spin = c(SPINNER_FRAMES[frame++ % SPINNER_FRAMES.length], 'steelBlue');
+        dock.setEphemeral(`${spin} ${c(word + '…', 'gray')} ${c(`(${elapsed}s)`, 'dim')}`);
+      };
+      tick();
+      const interval = setInterval(tick, 250);
+      return {
+        stop(finalNote) {
+          clearInterval(interval);
+          dock.clearEphemeral();
+          if (finalNote) dock.print(finalNote);
+        },
+      };
     },
     // Resolves the next time Enter is pressed while no other turn is
     // pending. Whatever's already in the box (typed while the previous
@@ -947,6 +999,7 @@ export function createChatDock() {
     nextMessage() {
       return new Promise((resolve) => {
         pendingResolve = resolve;
+        drawFooter();
       });
     },
   };

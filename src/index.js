@@ -133,8 +133,12 @@ function fitPath(path, maxLen) {
 // itself rather than guessed as a percentage of the terminal, so it can
 // never grow past its slot; right width is derived from the tips' own
 // natural width the same way, so the box can never overflow either.
-function printWelcomePanel({ email, isPro }) {
-  clearScreen();
+// `clear` is skipped by interactiveChat, which prints this fresh into an
+// already-blank alternate screen buffer; `log` lets it route through the
+// docked footer's print() there too, instead of a plain console.log that
+// would land outside the dock's own content-buffer bookkeeping.
+function printWelcomePanel({ email, isPro }, { log = console.log, clear = true } = {}) {
+  if (clear) clearScreen();
   const plan = isPro ? 'Pro' : 'Free';
   const rawName = email.split('@')[0] || 'there';
   const name = rawName.charAt(0).toUpperCase() + rawName.slice(1);
@@ -190,8 +194,8 @@ function printWelcomePanel({ email, isPro }) {
     leftWidth: leftContentWidth, rightWidth: rightContentWidth,
     dividerInset: 1,
   });
-  console.log(output);
-  console.log();
+  log(output);
+  log();
   return output.split('\n').length + 1; // +1 for the trailing blank line above
 }
 
@@ -449,8 +453,8 @@ function quickTipsLines(maxWidth) {
 // the welcome panel (tips live inside the panel itself now) — a plain
 // intro to what this CLI is, styled with a left accent bar like Claude
 // Code's own release-notes callout, ending in a link to the full docs.
-// Returns how many terminal lines it used, so the caller can size the
-// intro block it's part of (see introStartRow in interactiveChat).
+// Returns how many terminal lines it used, so the caller can decide
+// whether there's enough room to show it at all on a short terminal.
 const ABOUT_TEXT = 'QueckSilver CLI brings QueckSilver AI (Zora) into your terminal: chat, '
   + 'attach files, generate images and documents, or run one-off prompts without leaving your shell.';
 
@@ -459,15 +463,15 @@ function aboutSectionLineCount() {
   return wrapText(ABOUT_TEXT, width - 2).length + 4; // heading + body + blank separator + link
 }
 
-function printAboutSection() {
+function printAboutSection(log = console.log) {
   const width = terminalWidth({ min: 60, max: 100 });
   const bar = c('│', 'steelBlue');
-  console.log(bar + ' ' + c('This is QueckSilver CLI', 'steelBlue'));
+  log(bar + ' ' + c('This is QueckSilver CLI', 'steelBlue'));
   const bodyLines = wrapText(ABOUT_TEXT, width - 2);
-  bodyLines.forEach((line) => console.log(`${bar} ${line}`));
-  console.log(bar);
-  console.log(`${bar} ${c('More details here: ', 'gray')}${c('https://quecksilver.ch/cli', 'blue')}`);
-  console.log();
+  bodyLines.forEach((line) => log(`${bar} ${line}`));
+  log(bar);
+  log(`${bar} ${c('More details here: ', 'gray')}${c('https://quecksilver.ch/cli', 'blue')}`);
+  log();
   return bodyLines.length + 4;
 }
 
@@ -476,8 +480,8 @@ function printAboutSection() {
 // --search/--image/--doc/--music startup-flag equivalents). `files` carries
 // any pending attachments — e.g. an image to use as a create_image edit
 // reference.
-async function askForcedTool(forceTool, token, files = []) {
-  const spinner = startThinkingSpinner();
+async function askForcedTool(forceTool, token, files = [], { spinner: spinnerFactory = startThinkingSpinner } = {}) {
+  const spinner = spinnerFactory();
 
   let response;
   try {
@@ -578,8 +582,8 @@ async function askQuecksilver(prompt, history, token, files = [], { quiet = fals
 // waiting for the full reply. Used for the normal (non --json) terminal UX;
 // --json keeps using the buffered askQuecksilver above since a single JSON
 // blob is simpler and more robust to parse for scripting.
-async function askQuecksilverStream(prompt, history, token, files = [], { prefix = '', log = console.log } = {}) {
-  const spinner = startThinkingSpinner();
+async function askQuecksilverStream(prompt, history, token, files = [], { prefix = '', log = console.log, spinner: spinnerFactory = startThinkingSpinner } = {}) {
+  const spinner = spinnerFactory();
   const start = Date.now();
 
   let response;
@@ -721,42 +725,42 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], a
   const out = (s = '') => dock.print(s);
 
   // The dock switches to the alternate screen buffer here, before anything
-  // else is printed — see createChatDock()'s own comment for why: it's
-  // what keeps the input box's row numbers exempt from the terminal's own
-  // scrollback, so scrolling the conversation never drags the box along
-  // with it. The welcome panel/intro below render fresh into that blank
-  // buffer, not onto whatever was already on the normal screen.
+  // else is printed — see createChatDock()'s own comment for why: a real
+  // terminal has exactly one scrollback, so a footer "pinned" against it
+  // gets dragged along the instant the person scrolls; the alt screen has
+  // no native scrollback for it to get dragged through in the first place.
+  // Content and the footer are engaged empty, then the welcome panel/intro
+  // print through the dock itself (via `out`, not a plain console.log)
+  // so they become part of its own scrollable content buffer.
   dock.start();
+  const STATUS_TEXT = 'QueckSilver CLI • Powered by Zora';
+  dock.engage({ statusText: STATUS_TEXT, knownCommands: KNOWN_SLASH_COMMANDS });
 
-  const panelLines = account ? printWelcomePanel(account) : 0;
-  // The panel is permanent from here on — it's never cleared or redrawn
-  // again, it just scrolls off naturally as the conversation grows, same
-  // as any other line of chat history. Only the short "Type your
-  // message..."/"This is QueckSilver CLI" blurb printed right after it is
-  // meant to go away once real chatting starts; `introStartRow` is exactly
-  // the row that blurb begins on, so dock.clearFrom() below can wipe just
-  // that block without touching the panel above it.
-  const introStartRow = panelLines + 1;
+  if (account) printWelcomePanel(account, { log: out, clear: false });
+  // The panel above this point is permanent — it's never cleared or
+  // redrawn again, it just scrolls off naturally as the conversation
+  // grows, same as any other line of chat history. Only the short "Type
+  // your message..."/"This is QueckSilver CLI" blurb printed right after
+  // it is meant to go away once real chatting starts; `introMark` is the
+  // content buffer's length right before that blurb, so dock.truncateTo()
+  // below can cut just it back out without touching the panel above it.
+  const introMark = dock.mark();
   let headerActive = true;
   const printIntro = () => {
-    console.log(c('Type your message and press Enter to chat. Type "exit" to quit, or /commands to see everything else you can do.', 'gray'));
-    console.log();
-    let n = 2;
+    out(c('Type your message and press Enter to chat. Type "exit" to quit, or /commands to see everything else you can do.', 'gray'));
+    out();
     const aboutCost = aboutSectionLineCount();
-    if (process.stdout.isTTY && (process.stdout.rows || 24) - n - aboutCost - 4 > 0) {
-      n += printAboutSection();
+    if (process.stdout.isTTY && (process.stdout.rows || 24) - aboutCost - 6 > 0) {
+      printAboutSection(out);
     }
     if (initialHistory.length > 0) {
-      console.log(c(`Resumed previous session (${initialHistory.length / 2} turn(s)).`, 'gray'));
-      console.log();
-      n += 2;
+      out(c(`Resumed previous session (${initialHistory.length / 2} turn(s)).`, 'gray'));
+      out();
     }
-    return n;
   };
 
-  const STATUS_TEXT = 'QueckSilver CLI • Powered by Zora';
   const history = [...initialHistory];
-  const introLines = printIntro();
+  printIntro();
   let pendingFiles = files;
   let pendingOutput = null;
   let sessionOpen = open ?? getSetting('autoOpen');
@@ -785,19 +789,17 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], a
   // of a narrower default width leaving it looking cut short.
   const chatWidth = terminalWidth({ min: 80, max: 200 });
 
-  dock.engage({ nextRow: panelLines + introLines + 1, statusText: STATUS_TEXT, knownCommands: KNOWN_SLASH_COMMANDS });
-
   while (true) {
     const line = await dock.nextMessage();
     const text = line.trim();
     if (!text) continue;
     if (headerActive) {
       // Only the "type your message"/"This is QueckSilver CLI" blurb goes
-      // away here — the welcome panel above `introStartRow` is untouched,
-      // and the fixed input box itself is outside the cleared range
+      // away here — the welcome panel above `introMark` is untouched, and
+      // the fixed input box itself lives outside the content buffer
       // entirely, so it never disappears or flickers even for this first turn.
       headerActive = false;
-      dock.clearFrom(introStartRow);
+      dock.truncateTo(introMark);
     }
     out(userMessageBlock(text, chatWidth));
     out();
@@ -876,7 +878,7 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], a
             : { name: 'create_document', args: { doc_type: docCmd[1].toLowerCase(), topic: docCmd[2] } };
 
       try {
-        const result = await askForcedTool(forceTool, token, pendingFiles);
+        const result = await askForcedTool(forceTool, token, pendingFiles, { spinner: dock.spinner });
         pendingFiles = [];
         printReply(result.reply, { mark: ASSISTANT_MARK, log: out });
         out();
@@ -888,7 +890,7 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], a
     }
 
     try {
-      const result = await askQuecksilverStream(text, history, token, pendingFiles, { prefix: ASSISTANT_MARK, log: out });
+      const result = await askQuecksilverStream(text, history, token, pendingFiles, { prefix: ASSISTANT_MARK, log: out, spinner: dock.spinner });
       pendingFiles = [];
       out();
       finishTurn(text, result);
