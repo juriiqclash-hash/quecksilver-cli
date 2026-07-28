@@ -10,7 +10,7 @@ import { runLoginFlow } from './auth.js';
 import {
   c, mascot, logoArt, twoColumnBox, terminalWidth, clearScreen,
   centerBlock, visibleLength, startThinkingSpinner, openPath, readBoxedInput,
-  padToBottom, waitBriefly,
+  padToBottom, waitBriefly, wrapText, renderMarkdown, userMessageBlock,
 } from './ui.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -20,6 +20,23 @@ const SUPABASE_URL = 'https://pwdncixmwxedfhtiwpmt.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB3ZG5jaXhtd3hlZGZodGl3cG10Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUyNjE1NTIsImV4cCI6MjA5MDgzNzU1Mn0.z4qrH2YuBkVv9CbAOFNdbXD0wwAF8y-zCR584un_y9o';
 const ENDPOINT = `${SUPABASE_URL}/functions/v1/cli-chat`;
 const VERSION = pkg.version;
+
+// Marks the start of an assistant reply — a plain colored dot, not a
+// "zora> " label, so the transcript reads like a normal chat log instead
+// of a raw prompt echo. Wrapped continuation lines below it start flush
+// left with no repeated marker, same as the single-marker convention used
+// throughout the rest of this file's boxes and callouts.
+const ASSISTANT_MARK = c('● ', 'steelBlue');
+
+// Formats a reply's Markdown into clean ANSI and prints it with the
+// assistant marker on its first line only; `mark` defaults to '' for the
+// scripting-adjacent one-off paths that never showed a speaker label.
+function printReply(text, { mark = '' } = {}) {
+  const width = terminalWidth({ min: 60, max: 100 });
+  const lines = renderMarkdown(text, width).split('\n');
+  console.log('\n' + mark + (lines[0] ?? ''));
+  lines.slice(1).forEach((l) => console.log(l));
+}
 
 // Every slash command recognized inside interactiveChat's input loop
 // below — kept in one place so the live input-highlighting knows exactly
@@ -431,23 +448,6 @@ function quickTipsLines(maxWidth) {
 const ABOUT_TEXT = 'QueckSilver CLI brings QueckSilver AI (Zora) into your terminal: chat, '
   + 'attach files, generate images and documents, or run one-off prompts without leaving your shell.';
 
-function wrapText(text, maxWidth) {
-  const words = text.split(' ');
-  const lines = [];
-  let current = '';
-  for (const word of words) {
-    const next = current ? `${current} ${word}` : word;
-    if (next.length > maxWidth && current) {
-      lines.push(current);
-      current = word;
-    } else {
-      current = next;
-    }
-  }
-  if (current) lines.push(current);
-  return lines;
-}
-
 function aboutSectionLineCount() {
   const width = terminalWidth({ min: 60, max: 100 });
   return wrapText(ABOUT_TEXT, width - 2).length + 4; // heading + body + blank separator + link
@@ -614,7 +614,6 @@ async function askQuecksilverStream(prompt, history, token, files = [], { prefix
   const decoder = new TextDecoder();
   let buf = '';
   let fullReply = '';
-  let started = false;
   let spinnerStopped = false;
   let final = null;
 
@@ -622,6 +621,11 @@ async function askQuecksilverStream(prompt, history, token, files = [], { prefix
     if (!spinnerStopped) { spinner.stop(); spinnerStopped = true; }
   };
 
+  // Text arrives token-by-token, but it's Markdown source (**bold**, "- "
+  // bullets, headings, ...) — printing each chunk the instant it lands
+  // would just echo the raw punctuation. Buffering the whole reply and
+  // running it through renderMarkdown() once the stream ends is what turns
+  // that into real formatting, at the cost of the old live-typing effect.
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -640,12 +644,6 @@ async function askQuecksilverStream(prompt, history, token, files = [], { prefix
         stopSpinner();
         console.error(c(`Error: ${evt.error}`, 'red'));
       } else if (evt.text) {
-        if (!started) {
-          stopSpinner();
-          started = true;
-          process.stdout.write('\n' + prefix);
-        }
-        process.stdout.write(evt.text);
         fullReply += evt.text;
       } else if (evt.done) {
         final = evt;
@@ -654,7 +652,7 @@ async function askQuecksilverStream(prompt, history, token, files = [], { prefix
   }
 
   stopSpinner();
-  if (started) process.stdout.write('\n');
+  if (fullReply) printReply(fullReply, { mark: prefix });
 
   const elapsed = Math.max(1, Math.round((Date.now() - start) / 1000));
   const tokenPart = final?.usage?.totalTokens ? ` · ${final.usage.totalTokens} tokens` : '';
@@ -699,7 +697,7 @@ async function oneOffForcedTool(forceTool, token, { files = [], output, json, op
   if (json) {
     console.log(JSON.stringify(result));
   } else {
-    console.log('\n' + result.reply);
+    printReply(result.reply);
     printSources(result.sources);
   }
 
@@ -798,9 +796,17 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], u
     const text = line.trim();
     if (!text) continue;
     if (headerActive) {
+      // The welcome panel/logo, the "type your message" hint, and the
+      // "This is QueckSilver CLI" callout are onboarding chrome, not part
+      // of the conversation — the first real message clears them the same
+      // way Claude Code's own splash gives way to the chat transcript,
+      // instead of leaving them sitting above it forever.
       headerActive = false;
       process.stdout.removeListener('resize', redrawHeader);
+      clearScreen();
     }
+    console.log(userMessageBlock(text, chatWidth));
+    console.log();
     if (text === 'exit' || text === 'quit') break;
 
     const fileCmd = text.match(/^\/(?:file|attach)\s+(.+)$/i);
@@ -878,7 +884,8 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], u
       try {
         const result = await askForcedTool(forceTool, token, pendingFiles);
         pendingFiles = [];
-        console.log('\n' + c('zora> ', 'bold') + result.reply + '\n');
+        printReply(result.reply, { mark: ASSISTANT_MARK });
+        console.log();
         finishTurn(text, result);
       } catch (err) {
         console.error(c(`Connection error: ${err.message}`, 'red'));
@@ -887,7 +894,7 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], u
     }
 
     try {
-      const result = await askQuecksilverStream(text, history, token, pendingFiles, { prefix: c('zora> ', 'bold') });
+      const result = await askQuecksilverStream(text, history, token, pendingFiles, { prefix: ASSISTANT_MARK });
       pendingFiles = [];
       console.log();
       finishTurn(text, result);

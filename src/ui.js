@@ -35,8 +35,34 @@ export function c(text, color) {
 
 // Strips ANSI codes to measure real visible width (so box borders line up
 // even when a line contains colored text).
+const ANSI_PATTERN = /\x1b\[[0-9;]*m/g;
 export function visibleLength(str) {
-  return str.replace(/\x1b\[[0-9;]*m/g, '').length;
+  return str.replace(ANSI_PATTERN, '').length;
+}
+
+// Greedy word-wrap that treats each whitespace-separated token as a single
+// unit for width purposes, measuring by *visible* length — so a token that
+// already carries inline ANSI styling (e.g. a bolded word from
+// renderMarkdown below) doesn't get over-counted by its escape codes.
+export function wrapText(text, maxWidth) {
+  const words = text.split(/\s+/).filter(Boolean);
+  const lines = [];
+  let current = [];
+  let currentLen = 0;
+  for (const word of words) {
+    const len = visibleLength(word);
+    const sep = current.length ? 1 : 0;
+    if (currentLen + sep + len > maxWidth && current.length) {
+      lines.push(current.join(' '));
+      current = [word];
+      currentLen = len;
+    } else {
+      current.push(word);
+      currentLen += sep + len;
+    }
+  }
+  if (current.length) lines.push(current.join(' '));
+  return lines;
 }
 
 // Centers a block of (possibly colored) lines together as one unit — every
@@ -134,6 +160,179 @@ export function clearScreen() {
 export function divider(width) {
   const w = width || terminalWidth();
   return c('─'.repeat(Math.max(10, w)), 'dim');
+}
+
+// Renders a single chat message the person just submitted as one
+// highlighted, full-width bar — the terminal equivalent of the shaded
+// "you said" row a chat UI shows above its reply, instead of leaving the
+// raw input box (rule/text/rule/status) sitting in the scrollback as if it
+// were still live. Long messages wrap with a 2-space hanging indent so the
+// leading "› " marker only ever appears once.
+export function userMessageBlock(text, width) {
+  const w = Math.max(10, width || terminalWidth());
+  const bg = `${ESC}48;2;38;40;46m`;
+  const fg = `${ESC}38;2;226;227;230m`;
+  const marker = '› ';
+  const wrapped = wrapText(text, w - marker.length) ;
+  const bodyLines = wrapped.length > 0 ? wrapped : [''];
+  return bodyLines.map((line, i) => {
+    const prefix = i === 0 ? marker : '  ';
+    const content = prefix + line;
+    const pad = ' '.repeat(Math.max(0, w - visibleLength(content)));
+    return `${bg}${fg}${content}${pad}${RESET}`;
+  }).join('\n');
+}
+
+// A small, dependency-free Markdown -> ANSI renderer for chat replies.
+// Model output routinely comes back as literal Markdown (**bold**, "- "
+// bullets, "###" headings, "***" rules, fenced code) — printing that
+// straight to a terminal just shows the raw punctuation. This walks the
+// text block-by-block (headings, lists, blockquotes, code fences, rule
+// lines, paragraphs) and turns each into something a terminal can actually
+// render: real bold/italic escapes, "•" bullets, a dim vertical bar for
+// quotes, and word-wrapped paragraphs — with blank-line spacing between
+// blocks so the result reads like prose instead of a wall of text.
+const HEADING_RE = /^(#{1,6})\s+(.*)$/;
+const BULLET_RE = /^(\s*)[-*+]\s+(.*)$/;
+const ORDERED_RE = /^(\s*)(\d+)[.)]\s+(.*)$/;
+const QUOTE_RE = /^>\s?(.*)$/;
+const RULE_RE = /^ {0,3}([-*_])(?:\s*\1){2,}\s*$/;
+const FENCE_RE = /^```/;
+
+// Inline spans only — block-level markers (headings, bullets, quote bars)
+// are stripped by the caller before this ever sees the line, so "* item"
+// can never be mistaken for italic here.
+function inlineFormat(text) {
+  return text
+    .replace(/`([^`]+)`/g, (_, code) => c(code, 'blue'))
+    .replace(/\*\*([^*]+)\*\*|__([^_]+)__/g, (_, a, b) => `${colors.bold}${a ?? b}${RESET}`)
+    .replace(/(?<![*\w])\*([^\s*][^*]*?)\*(?!\w)|(?<![_\w])_([^\s_][^_]*?)_(?!\w)/g,
+      (_, a, b) => `${ESC}3m${a ?? b}${ESC}23m`);
+}
+
+export function renderMarkdown(text, width) {
+  const w = Math.max(20, width || terminalWidth());
+  const rawLines = String(text ?? '').replace(/\r\n/g, '\n').split('\n');
+  const out = [];
+  let paragraph = [];
+  let inCode = false;
+  let lastWasBlank = true; // suppresses a leading blank line at the very top
+  // A description that follows a list item, indented but with no marker of
+  // its own (the "1. **Label**\n   explanation" shape models commonly
+  // produce), reads as its own flush-left paragraph unless it's tracked as
+  // still belonging to that item — this carries the item's hanging indent
+  // forward across such continuation lines until real flush-left text or a
+  // new block ends it.
+  let listIndent = null;
+  let paragraphIndent = '';
+
+  const pushBlank = () => {
+    if (!lastWasBlank) out.push('');
+    lastWasBlank = true;
+  };
+  const flushParagraph = () => {
+    if (paragraph.length === 0) return;
+    const joined = inlineFormat(paragraph.join(' '));
+    const indent = paragraphIndent;
+    wrapText(joined, Math.max(10, w - indent.length)).forEach((l) => out.push(indent + l));
+    paragraph = [];
+    paragraphIndent = '';
+    lastWasBlank = false;
+  };
+
+  for (const raw of rawLines) {
+    const line = raw.replace(/\s+$/, '');
+
+    if (FENCE_RE.test(line)) {
+      flushParagraph();
+      listIndent = null;
+      inCode = !inCode;
+      if (!inCode) lastWasBlank = false;
+      continue;
+    }
+    if (inCode) {
+      out.push(c('▏ ', 'dim') + c(raw, 'gray'));
+      lastWasBlank = false;
+      continue;
+    }
+
+    if (line.trim() === '') {
+      flushParagraph();
+      pushBlank();
+      continue;
+    }
+
+    if (RULE_RE.test(line)) {
+      flushParagraph();
+      listIndent = null;
+      pushBlank();
+      continue;
+    }
+
+    const heading = line.match(HEADING_RE);
+    if (heading) {
+      flushParagraph();
+      listIndent = null;
+      pushBlank();
+      out.push(`${colors.bold}${c(inlineFormat(heading[2]), 'steelBlue')}${RESET}`);
+      lastWasBlank = false;
+      pushBlank();
+      continue;
+    }
+
+    const bullet = line.match(BULLET_RE);
+    if (bullet) {
+      flushParagraph();
+      const indent = '  '.repeat(Math.floor(bullet[1].length / 2));
+      const marker = `${indent}${c('•', 'steelBlue')} `;
+      const body = inlineFormat(bullet[2]);
+      const wrapped = wrapText(body, Math.max(10, w - visibleLength(marker)));
+      wrapped.forEach((l, i) => out.push((i === 0 ? marker : ' '.repeat(visibleLength(marker))) + l));
+      listIndent = ' '.repeat(visibleLength(marker));
+      lastWasBlank = false;
+      continue;
+    }
+
+    const ordered = line.match(ORDERED_RE);
+    if (ordered) {
+      flushParagraph();
+      const indent = '  '.repeat(Math.floor(ordered[1].length / 2));
+      const marker = `${indent}${c(`${ordered[2]}.`, 'steelBlue')} `;
+      const body = inlineFormat(ordered[3]);
+      const wrapped = wrapText(body, Math.max(10, w - visibleLength(marker)));
+      wrapped.forEach((l, i) => out.push((i === 0 ? marker : ' '.repeat(visibleLength(marker))) + l));
+      listIndent = ' '.repeat(visibleLength(marker));
+      lastWasBlank = false;
+      continue;
+    }
+
+    const quote = line.match(QUOTE_RE);
+    if (quote) {
+      flushParagraph();
+      listIndent = null;
+      const marker = c('│ ', 'dim');
+      const wrapped = wrapText(inlineFormat(quote[1]), Math.max(10, w - visibleLength(marker)));
+      wrapped.forEach((l) => out.push(marker + l));
+      lastWasBlank = false;
+      continue;
+    }
+
+    // Plain text. Only treated as a list continuation when it's both
+    // indented in the source AND a list item is still active — flush-left
+    // text always ends the list's hanging-indent context.
+    const isIndented = /^\s/.test(raw);
+    if (isIndented && listIndent !== null) {
+      if (paragraph.length === 0) paragraphIndent = listIndent;
+    } else {
+      listIndent = null;
+    }
+    paragraph.push(line.trim());
+  }
+  flushParagraph();
+
+  // Trim any trailing blank line left by the last block's own spacing.
+  while (out.length && out[out.length - 1] === '') out.pop();
+  return out.join('\n');
 }
 
 // Pads with blank lines so whatever prints right after lands on the
@@ -644,8 +843,16 @@ export function readBoxedInput({ width, statusText, knownCommands = [], resizeCo
       if (key && (key.name === 'return' || key.name === 'enter')) {
         if (!buf && Date.now() < suppressEmptyEnterUntil) return;
         cleanup();
-        readline.moveCursor(process.stdout, 0, 3);
+        // Erase the whole box (rule/input/rule/status) instead of leaving
+        // it behind as scrollback chrome — the caller replaces it with a
+        // clean highlighted echo of what was submitted (userMessageBlock
+        // above), so the transcript reads like a normal chat log rather
+        // than a stack of leftover input boxes. Same up-1-then-clear-down
+        // move the resize handler below uses, since the cursor is in the
+        // same "parked on the input row" spot in both cases.
+        readline.moveCursor(process.stdout, 0, -1);
         readline.cursorTo(process.stdout, 0);
+        readline.clearScreenDown(process.stdout);
         resolve(buf);
         return;
       }
