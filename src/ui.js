@@ -128,6 +128,63 @@ export function twoColumnBox(leftLines, rightLines, { color = 'steelBlue', paddi
   return [top, ...rows, bottom].join('\n');
 }
 
+// Some environments report a `process.stdout.columns` that's genuinely
+// smaller than the terminal's real, visible width — not a rounding-by-one
+// thing, a real gap (confirmed on one Windows Terminal/PowerShell setup:
+// even a bare `node -e "console.log('-'.repeat(process.stdout.columns))"`,
+// nothing to do with this CLI at all, stopped short of the window edge).
+// That's a mismatch between what the OS console API reports and what the
+// terminal application itself knows its own width to be — so the fix is
+// to ask the terminal directly instead of trusting the OS: detectTerminalWidth()
+// below sends CSI 18t ("report the window size in characters") and parses
+// the CSI 8;rows;cols t reply the terminal sends back on stdin, standard
+// VT/xterm behavior that Windows Terminal also implements. When it works,
+// `verifiedColumns` overrides process.stdout.columns everywhere in this
+// file; when the terminal doesn't answer in time, everything just keeps
+// using process.stdout.columns exactly as before.
+let verifiedColumns = null;
+
+// Call once, early, before anything the dock or the welcome screens print
+// depends on width — safe to call from a plain (non-raw) stdin, briefly
+// switches to raw mode to read the reply without it echoing to the screen
+// or needing Enter, then restores whatever mode stdin was already in.
+// Resolves quickly either way: `timeoutMs` bounds how long a terminal that
+// doesn't support the query can hold up startup.
+export function detectTerminalWidth({ timeoutMs = 150 } = {}) {
+  return new Promise((resolve) => {
+    if (!process.stdout.isTTY || !process.stdin.isTTY) { resolve(); return; }
+    const stdin = process.stdin;
+    const wasRaw = stdin.isRaw;
+    let settled = false;
+    let buf = '';
+
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      stdin.removeListener('data', onData);
+      if (stdin.setRawMode) stdin.setRawMode(wasRaw ?? false);
+      stdin.pause();
+      resolve();
+    };
+    const onData = (chunk) => {
+      buf += chunk.toString('latin1');
+      const m = buf.match(/\x1b\[8;(\d+);(\d+)t/);
+      if (m) {
+        const cols = parseInt(m[2], 10);
+        if (Number.isFinite(cols) && cols > 0) verifiedColumns = cols;
+        finish();
+      }
+    };
+
+    if (stdin.setRawMode) stdin.setRawMode(true);
+    stdin.resume();
+    stdin.on('data', onData);
+    const timer = setTimeout(finish, timeoutMs);
+    process.stdout.write(`${ESC}18t`);
+  });
+}
+
 // The real terminal width, clamped to a sane range so the layout never
 // goes absurdly narrow (piped/unknown width) or absurdly wide (huge
 // monitor) — used to size every full-width screen the same way.
@@ -136,10 +193,10 @@ export function terminalWidth({ min = 60, max = 120, fallback = 80 } = {}) {
   // width. Writing a box/rule/status line all the way out to that exact
   // last column runs into each terminal's own edge/auto-wrap handling —
   // observed as the box's right border and the footer's status text both
-  // getting clipped a character short on some terminals (Windows Terminal/
-  // PowerShell among them). One column of margin avoids that ambiguity
-  // everywhere this width is used, at a cosmetically unnoticeable cost.
-  const cols = (process.stdout.columns || fallback) - 1;
+  // getting clipped a character short on some terminals. One column of
+  // margin avoids that ambiguity everywhere this width is used, at a
+  // cosmetically unnoticeable cost.
+  const cols = (verifiedColumns ?? process.stdout.columns ?? fallback) - 1;
   // The returned width must never exceed the terminal's *real* current
   // column count, even when that's narrower than `min` — every box/rule
   // this powers assumes one logical line = one physical terminal row, and

@@ -10,7 +10,7 @@ import { runLoginFlow } from './auth.js';
 import {
   c, mascot, logoArt, twoColumnBox, terminalWidth, clearScreen, setTerminalTitle,
   centerBlock, visibleLength, startThinkingSpinner, openPath, createChatDock,
-  waitBriefly, wrapText, renderMarkdown, userMessageBlock,
+  waitBriefly, wrapText, renderMarkdown, userMessageBlock, detectTerminalWidth,
 } from './ui.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1070,6 +1070,16 @@ async function startSession(token, options) {
 // `quecksilver` with no subcommand: shows the banner, and either starts
 // chatting (already logged in) or tells the user to run `quecksilver login`.
 export async function main(options) {
+  // Best-effort: on some setups process.stdout.columns itself under-reports
+  // the terminal's real width (confirmed independent of anything this CLI
+  // draws — see detectTerminalWidth()'s own comment in ui.js), which no
+  // amount of clamping/margin math on our end can correct since it isn't
+  // a rendering bug, it's wrong input. Asking the terminal directly, once,
+  // before anything width-dependent prints, is what actually fixes that;
+  // costs nothing beyond a short timeout on terminals that just don't
+  // support the query, where it silently falls through to the old behavior.
+  if (!options.json) await detectTerminalWidth();
+
   const token = getToken();
 
   if (!token) {
