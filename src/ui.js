@@ -132,7 +132,14 @@ export function twoColumnBox(leftLines, rightLines, { color = 'steelBlue', paddi
 // goes absurdly narrow (piped/unknown width) or absurdly wide (huge
 // monitor) — used to size every full-width screen the same way.
 export function terminalWidth({ min = 60, max = 120, fallback = 80 } = {}) {
-  const cols = process.stdout.columns || fallback;
+  // Reserve the terminal's own last column rather than reporting the full
+  // width. Writing a box/rule/status line all the way out to that exact
+  // last column runs into each terminal's own edge/auto-wrap handling —
+  // observed as the box's right border and the footer's status text both
+  // getting clipped a character short on some terminals (Windows Terminal/
+  // PowerShell among them). One column of margin avoids that ambiguity
+  // everywhere this width is used, at a cosmetically unnoticeable cost.
+  const cols = (process.stdout.columns || fallback) - 1;
   // The returned width must never exceed the terminal's *real* current
   // column count, even when that's narrower than `min` — every box/rule
   // this powers assumes one logical line = one physical terminal row, and
@@ -153,6 +160,15 @@ export function terminalWidth({ min = 60, max = 120, fallback = 80 } = {}) {
 export function clearScreen() {
   if (!process.stdout.isTTY) return;
   process.stdout.write('\x1b[2J\x1b[3J\x1b[H');
+}
+
+// Sets the terminal window/tab title (the OSC 0 sequence — widely
+// supported, including Windows Terminal/PowerShell) so the tab reads
+// "QueckSilver CLI" instead of whatever shell/binary name the terminal
+// falls back to by default. No-ops when stdout isn't a real TTY.
+export function setTerminalTitle(title) {
+  if (!process.stdout.isTTY) return;
+  process.stdout.write(`\x1b]0;${title}\x07`);
 }
 
 // A full-width horizontal rule, framing the chat input like a text box —
@@ -858,10 +874,29 @@ export function createChatDock() {
   };
 
   // delta > 0 reveals older lines (scroll up / PageUp), delta < 0 moves
-  // back toward the live tail (scroll down / PageDown) — clamped above.
+  // back toward the live tail (scroll down / PageDown) — clamped in
+  // redrawContent(). A single mouse-wheel notch typically arrives as a
+  // burst of several arrow-key sequences in one go (that's the whole
+  // mechanism this relies on — see the file-level comment above), which
+  // used to mean one full viewport redraw *per key* in that burst:
+  // technically flicker-free on its own, but several redraws stepping
+  // through in a row read as sluggish, stuttery scrolling rather than one
+  // smooth jump. Accumulating the deltas from an entire burst and only
+  // actually redrawing once, on setImmediate (which runs only after every
+  // keypress Node has already parsed out of the current input chunk has
+  // fired), turns that whole burst into the single jump it visually should be.
+  let pendingScroll = 0;
+  let scrollFlushQueued = false;
   const scrollBy = (delta) => {
-    scrollOffset = Math.max(0, scrollOffset + delta);
-    redrawContent();
+    pendingScroll += delta;
+    if (scrollFlushQueued) return;
+    scrollFlushQueued = true;
+    setImmediate(() => {
+      scrollFlushQueued = false;
+      scrollOffset = Math.max(0, scrollOffset + pendingScroll);
+      pendingScroll = 0;
+      redrawContent();
+    });
   };
 
   const leaveScreen = () => {
@@ -879,8 +914,12 @@ export function createChatDock() {
     }
     if (key && key.name === 'pageup') { scrollBy(Math.max(1, regionBottom - 1)); return; }
     if (key && key.name === 'pagedown') { scrollBy(-Math.max(1, regionBottom - 1)); return; }
-    if (key && key.name === 'up') { scrollBy(1); return; }
-    if (key && key.name === 'down') { scrollBy(-1); return; }
+    // 3 lines per key, not 1 — matches the usual "one wheel notch" amount
+    // most terminals/OSes scroll by default, so a notch (however many of
+    // these arrive for it — see the scrollBy comment) reads as a normal
+    // scroll instead of the barely-there single-line creep 1 produced.
+    if (key && key.name === 'up') { scrollBy(3); return; }
+    if (key && key.name === 'down') { scrollBy(-3); return; }
     if (key && (key.name === 'return' || key.name === 'enter')) {
       // No turn is currently pending — either still on the welcome screen
       // before engage(), or a reply is actively streaming in. Either way,
@@ -921,6 +960,7 @@ export function createChatDock() {
       if (!process.stdout.isTTY) return;
       active = true;
       process.stdout.write(ENTER_ALT_SCREEN);
+      setTerminalTitle('QueckSilver CLI');
       wasRaw = process.stdin.isRaw;
       readline.emitKeypressEvents(process.stdin);
       if (process.stdin.setRawMode) process.stdin.setRawMode(true);

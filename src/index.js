@@ -8,7 +8,7 @@ import {
 } from './config.js';
 import { runLoginFlow } from './auth.js';
 import {
-  c, mascot, logoArt, twoColumnBox, terminalWidth, clearScreen,
+  c, mascot, logoArt, twoColumnBox, terminalWidth, clearScreen, setTerminalTitle,
   centerBlock, visibleLength, startThinkingSpinner, openPath, createChatDock,
   waitBriefly, wrapText, renderMarkdown, userMessageBlock,
 } from './ui.js';
@@ -108,6 +108,7 @@ async function fetchAccountInfo(token) {
 // the top of the window, the same way Claude Code's own splash does.
 function printWelcomeBanner() {
   clearScreen();
+  setTerminalTitle('QueckSilver CLI');
   const width = terminalWidth({ min: 80, max: 200 });
   console.log();
   console.log(c('Welcome to QueckSilver CLI', 'steelBlue') + c(' · ', 'gray') + c(`v${VERSION}`, 'gray'));
@@ -138,7 +139,7 @@ function fitPath(path, maxLen) {
 // docked footer's print() there too, instead of a plain console.log that
 // would land outside the dock's own content-buffer bookkeeping.
 function printWelcomePanel({ email, isPro }, { log = console.log, clear = true } = {}) {
-  if (clear) clearScreen();
+  if (clear) { clearScreen(); setTerminalTitle('QueckSilver CLI'); }
   const plan = isPro ? 'Pro' : 'Free';
   const rawName = email.split('@')[0] || 'there';
   const name = rawName.charAt(0).toUpperCase() + rawName.slice(1);
