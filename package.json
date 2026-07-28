@@ -1,6 +1,6 @@
 {
   "name": "quecksilver-cli",
-  "version": "1.7.18",
+  "version": "1.7.19",
   "bin": {
     "quecksilver": "bin/cli.js"
   },
