@@ -38,6 +38,27 @@ const FULL_WIDTH = { min: 80, max: 400 };
 // throughout the rest of this file's boxes and callouts.
 const ASSISTANT_MARK = c('● ', 'steelBlue');
 
+// A recoverable API failure (expired session, rate limit, non-2xx
+// response) — thrown by the ask* functions below instead of them printing
+// straight to the terminal and calling process.exit() themselves. That
+// used to be safe when this was the only kind of terminal UI the CLI had,
+// but interactiveChat's docked footer runs in the alternate screen buffer
+// (see createChatDock() in ui.js): a message printed there and immediately
+// followed by process.exit() is invisible — the exit handoff back to the
+// primary screen happens before anyone could ever see it, so a session
+// expiring mid-chat looked exactly like the CLI silently quitting for no
+// reason. Throwing instead lets each call site decide *where* the message
+// actually ends up: interactiveChat's own catch block routes it through
+// the dock (visible) and, for the one truly un-retryable case — a session
+// that's actually expired — leaves the alternate screen first so the
+// final message lands on the terminal the person is looking at, exactly
+// like the one-off (non-interactive) paths already did before any of this.
+function apiError(message, { sessionExpired = false } = {}) {
+  const err = new Error(message);
+  err.sessionExpired = sessionExpired;
+  return err;
+}
+
 // Renders a reply's Markdown into clean ANSI, as one block with the
 // assistant marker folded into its first line — shared by printReply()
 // below (the final, committed reply) and askQuecksilverStream's live
@@ -520,21 +541,18 @@ async function askForcedTool(forceTool, token, files = [], { spinner: spinnerFac
 
   if (response.status === 401) {
     spinner.stop();
-    console.log(c('Session expired. Run "quecksilver login" to sign in again.', 'red'));
-    process.exit(1);
+    throw apiError('Session expired. Run "quecksilver login" to sign in again.', { sessionExpired: true });
   }
 
   if (response.status === 429) {
     spinner.stop();
-    console.log(c('Too many requests. Wait a bit and try again.', 'yellow'));
-    process.exit(1);
+    throw apiError('Too many requests. Wait a bit and try again.');
   }
 
   if (!response.ok) {
     spinner.stop();
     const errBody = await response.json().catch(() => ({}));
-    console.error(c(`Error: ${response.status} ${errBody.error || response.statusText}`, 'red'));
-    process.exit(1);
+    throw apiError(`Error: ${response.status} ${errBody.error || response.statusText}`);
   }
 
   const data = await response.json();
@@ -568,21 +586,18 @@ async function askQuecksilver(prompt, history, token, files = [], { quiet = fals
 
   if (response.status === 401) {
     spinner?.stop();
-    console.log(c('Session expired. Run "quecksilver login" to sign in again.', 'red'));
-    process.exit(1);
+    throw apiError('Session expired. Run "quecksilver login" to sign in again.', { sessionExpired: true });
   }
 
   if (response.status === 429) {
     spinner?.stop();
-    console.log(c('Too many requests. Wait a bit and try again.', 'yellow'));
-    process.exit(1);
+    throw apiError('Too many requests. Wait a bit and try again.');
   }
 
   if (!response.ok) {
     spinner?.stop();
     const errBody = await response.json().catch(() => ({}));
-    console.error(c(`Error: ${response.status} ${errBody.error || response.statusText}`, 'red'));
-    process.exit(1);
+    throw apiError(`Error: ${response.status} ${errBody.error || response.statusText}`);
   }
 
   const data = await response.json();
@@ -623,21 +638,18 @@ async function askQuecksilverStream(prompt, history, token, files = [], { prefix
 
   if (response.status === 401) {
     spinner.stop();
-    console.log(c('Session expired. Run "quecksilver login" to sign in again.', 'red'));
-    process.exit(1);
+    throw apiError('Session expired. Run "quecksilver login" to sign in again.', { sessionExpired: true });
   }
 
   if (response.status === 429) {
     spinner.stop();
-    console.log(c('Too many requests. Wait a bit and try again.', 'yellow'));
-    process.exit(1);
+    throw apiError('Too many requests. Wait a bit and try again.');
   }
 
   if (!response.ok) {
     spinner.stop();
     const errBody = await response.json().catch(() => ({}));
-    console.error(c(`Error: ${response.status} ${errBody.error || response.statusText}`, 'red'));
-    process.exit(1);
+    throw apiError(`Error: ${response.status} ${errBody.error || response.statusText}`);
   }
 
   const reader = response.body.getReader();
@@ -706,9 +718,15 @@ async function askQuecksilverStream(prompt, history, token, files = [], { prefix
 }
 
 async function oneOff(prompt, token, { files = [], output, json, open, history = [] } = {}) {
-  const result = json
-    ? await askQuecksilver(prompt, history, token, files, { quiet: true })
-    : await askQuecksilverStream(prompt, history, token, files);
+  let result;
+  try {
+    result = json
+      ? await askQuecksilver(prompt, history, token, files, { quiet: true })
+      : await askQuecksilverStream(prompt, history, token, files);
+  } catch (err) {
+    console.log(c(err.message, 'red'));
+    process.exit(1);
+  }
 
   if (json) {
     console.log(JSON.stringify(result));
@@ -731,7 +749,13 @@ async function oneOff(prompt, token, { files = [], output, json, open, history =
 // commands (--search/--image/--doc/--music) — a single forced-tool call
 // with no interactive session.
 async function oneOffForcedTool(forceTool, token, { files = [], output, json, open } = {}) {
-  const result = await askForcedTool(forceTool, token, files);
+  let result;
+  try {
+    result = await askForcedTool(forceTool, token, files);
+  } catch (err) {
+    console.log(c(err.message, 'red'));
+    process.exit(1);
+  }
 
   if (json) {
     console.log(JSON.stringify(result));
@@ -762,8 +786,33 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], a
   // print through the dock itself (via `out`, not a plain console.log)
   // so they become part of its own scrollable content buffer.
   dock.start();
+  // Some terminals (ConPTY-backed ones — Windows Terminal/PowerShell among
+  // them — in particular) haven't finished settling their own reported
+  // column count by the moment the alternate-screen switch write above
+  // actually lands, so a size read on the very next tick can come back
+  // narrower than the window's real, current width — seen as the panel
+  // and the footer's rule both stopping short of the right edge while the
+  // left edge sits flush. A brief pause before the first geometry read
+  // (engage(), which sizes the footer) and the first render gives it a
+  // moment to catch up; imperceptible at human reaction time either way.
+  if (process.stdout.isTTY) await new Promise((resolve) => setTimeout(resolve, 50));
   const STATUS_TEXT = 'QueckSilver CLI • Powered by Zora';
   dock.engage({ statusText: STATUS_TEXT, knownCommands: KNOWN_SLASH_COMMANDS });
+
+  // A crash anywhere that isn't already wrapped in a try/catch on the
+  // turn-processing path above (a timer callback like the spinner's tick,
+  // a bug in a redraw) would otherwise be a genuinely silent exit: Node's
+  // default handling for an uncaught exception prints to stderr and quits
+  // *before* the dock's own exit-time cleanup gets a real chance to run
+  // first, so the message (if it's even visible at all, mid alt-screen)
+  // is gone the instant the screen switches back. This guarantees the
+  // alternate screen is actually left — so whatever went wrong is visible
+  // on the terminal the person is looking at — before reporting it.
+  process.on('uncaughtException', (err) => {
+    dock.stop();
+    console.error(c(`Unexpected error: ${err.message}`, 'red'));
+    process.exit(1);
+  });
 
   if (account) printWelcomePanel(account, { log: out, clear: false });
   // The panel above this point is permanent — it's never cleared or
@@ -811,6 +860,26 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], a
     history.push({ role: 'user', text });
     history.push({ role: 'model', text: result.reply });
     saveLastSession(history);
+  };
+
+  // A failed turn (network error, rate limit, expired session — see
+  // apiError()'s own comment for why these are thrown rather than printed
+  // straight from inside the ask* functions) always gets shown in the
+  // chat itself first, so it's visible right where the person is already
+  // looking. A session that's actually expired can't recover by itself —
+  // every further message would fail identically — so that one case also
+  // ends the session outright, but only *after* leaving the alternate
+  // screen, so the final message lands on the terminal the person
+  // actually sees once control returns to their shell, not on the
+  // about-to-be-abandoned alt-screen buffer. Returns true when the caller
+  // should stop the turn loop (the session already ended).
+  const handleTurnError = (err) => {
+    out(c(`Connection error: ${err.message}`, 'red'));
+    if (!err.sessionExpired) return false;
+    dock.stop();
+    console.log(c(err.message, 'red'));
+    process.exit(1);
+    return true;
   };
 
   // Same terminalWidth() range the welcome panel above used for its own
@@ -913,7 +982,7 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], a
         out();
         finishTurn(text, result);
       } catch (err) {
-        out(c(`Connection error: ${err.message}`, 'red'));
+        if (handleTurnError(err)) return;
       }
       continue;
     }
@@ -924,7 +993,7 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], a
       out();
       finishTurn(text, result);
     } catch (err) {
-      out(c(`Connection error: ${err.message}`, 'red'));
+      if (handleTurnError(err)) return;
     }
   }
 
