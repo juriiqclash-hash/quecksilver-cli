@@ -21,6 +21,16 @@ const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 const ENDPOINT = `${SUPABASE_URL}/functions/v1/cli-chat`;
 const VERSION = pkg.version;
 
+// Shared width bound for every full-terminal-width element (the splash
+// logo, the welcome panel, the user-message bar) — 200 turned out to be an
+// active cap on real wide monitors/small fonts (200+ columns is common),
+// leaving a visible gap on the right that the left edge didn't have. 400
+// is generous enough to just mean "the terminal's own width" in practice
+// while still bounding the pathological case of a garbage-reported column
+// count. Matches ui.js's own footerWidth() so the panel/message bar and
+// the docked input box's rule/status line always line up.
+const FULL_WIDTH = { min: 80, max: 400 };
+
 // Marks the start of an assistant reply — a plain colored dot, not a
 // "zora> " label, so the transcript reads like a normal chat log instead
 // of a raw prompt echo. Wrapped continuation lines below it start flush
@@ -28,16 +38,25 @@ const VERSION = pkg.version;
 // throughout the rest of this file's boxes and callouts.
 const ASSISTANT_MARK = c('● ', 'steelBlue');
 
-// Formats a reply's Markdown into clean ANSI and prints it with the
-// assistant marker on its first line only; `mark` defaults to '' for the
-// scripting-adjacent one-off paths that never showed a speaker label, and
-// `log` defaults to console.log for those same paths (interactiveChat
-// passes its docked footer's print() instead).
-function printReply(text, { mark = '', log = console.log } = {}) {
+// Renders a reply's Markdown into clean ANSI, as one block with the
+// assistant marker folded into its first line — shared by printReply()
+// below (the final, committed reply) and askQuecksilverStream's live
+// preview (the same reply, re-rendered on every chunk while it's still
+// streaming in), so what's on screen never visibly changes shape at the
+// moment the preview is replaced by the real thing.
+function formatReply(text, mark = '') {
   const width = terminalWidth({ min: 60, max: 100 });
   const lines = renderMarkdown(text, width).split('\n');
-  log('\n' + mark + (lines[0] ?? ''));
-  lines.slice(1).forEach((l) => log(l));
+  lines[0] = mark + (lines[0] ?? '');
+  return '\n' + lines.join('\n');
+}
+
+// `mark` defaults to '' for the scripting-adjacent one-off paths that
+// never showed a speaker label, and `log` defaults to console.log for
+// those same paths (interactiveChat passes its docked footer's print()
+// instead).
+function printReply(text, { mark = '', log = console.log } = {}) {
+  log(formatReply(text, mark));
 }
 
 // Every slash command recognized inside interactiveChat's input loop
@@ -109,7 +128,7 @@ async function fetchAccountInfo(token) {
 function printWelcomeBanner() {
   clearScreen();
   setTerminalTitle('QueckSilver CLI');
-  const width = terminalWidth({ min: 80, max: 200 });
+  const width = terminalWidth(FULL_WIDTH);
   console.log();
   console.log(c('Welcome to QueckSilver CLI', 'steelBlue') + c(' · ', 'gray') + c(`v${VERSION}`, 'gray'));
   console.log();
@@ -144,7 +163,7 @@ function printWelcomePanel({ email, isPro }, { log = console.log, clear = true }
   const rawName = email.split('@')[0] || 'there';
   const name = rawName.charAt(0).toUpperCase() + rawName.slice(1);
 
-  const total = terminalWidth({ min: 80, max: 200 });
+  const total = terminalWidth(FULL_WIDTH);
   // Non-content characters twoColumnBox always draws: left border + left
   // padding*2 + divider + right padding*2 + right border = 1+2+1+2+1.
   const structureOverhead = 7;
@@ -583,7 +602,7 @@ async function askQuecksilver(prompt, history, token, files = [], { quiet = fals
 // waiting for the full reply. Used for the normal (non --json) terminal UX;
 // --json keeps using the buffered askQuecksilver above since a single JSON
 // blob is simpler and more robust to parse for scripting.
-async function askQuecksilverStream(prompt, history, token, files = [], { prefix = '', log = console.log, spinner: spinnerFactory = startThinkingSpinner } = {}) {
+async function askQuecksilverStream(prompt, history, token, files = [], { prefix = '', log = console.log, spinner: spinnerFactory = startThinkingSpinner, setEphemeral = null } = {}) {
   const spinner = spinnerFactory();
   const start = Date.now();
 
@@ -632,11 +651,18 @@ async function askQuecksilverStream(prompt, history, token, files = [], { prefix
     if (!spinnerStopped) { spinner.stop(); spinnerStopped = true; }
   };
 
-  // Text arrives token-by-token, but it's Markdown source (**bold**, "- "
-  // bullets, headings, ...) — printing each chunk the instant it lands
-  // would just echo the raw punctuation. Buffering the whole reply and
-  // running it through renderMarkdown() once the stream ends is what turns
-  // that into real formatting, at the cost of the old live-typing effect.
+  // Text arrives token-by-token as Markdown source (**bold**, "- " bullets,
+  // headings, ...) — echoing each raw chunk the instant it lands would
+  // just show the punctuation unrendered. But waiting for the *entire*
+  // reply before showing anything reads as a stall (no feedback at all
+  // until the whole thing is done), especially next to the web app's own
+  // live-typing reply. setEphemeral splits the difference: every chunk
+  // re-renders the *whole* reply so far through the same formatter as the
+  // final version and re-stages it as the dock's live preview — so it's
+  // visibly typing in, already close to its final look the whole time
+  // (an unclosed "**bold" just reads as plain text until its closing "**"
+  // arrives), and the moment the stream ends this exact rendering gets
+  // committed for real, with no visible change in shape.
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -655,7 +681,9 @@ async function askQuecksilverStream(prompt, history, token, files = [], { prefix
         stopSpinner();
         log(c(`Error: ${evt.error}`, 'red'));
       } else if (evt.text) {
+        stopSpinner();
         fullReply += evt.text;
+        if (setEphemeral) setEphemeral(formatReply(fullReply, prefix));
       } else if (evt.done) {
         final = evt;
       }
@@ -788,7 +816,7 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], a
   // Same terminalWidth() range the welcome panel above used for its own
   // `total`, so the user-message bar lines up edge-to-edge with it instead
   // of a narrower default width leaving it looking cut short.
-  const chatWidth = terminalWidth({ min: 80, max: 200 });
+  const chatWidth = terminalWidth(FULL_WIDTH);
 
   while (true) {
     const line = await dock.nextMessage();
@@ -891,7 +919,7 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], a
     }
 
     try {
-      const result = await askQuecksilverStream(text, history, token, pendingFiles, { prefix: ASSISTANT_MARK, log: out, spinner: dock.spinner });
+      const result = await askQuecksilverStream(text, history, token, pendingFiles, { prefix: ASSISTANT_MARK, log: out, spinner: dock.spinner, setEphemeral: dock.setEphemeral });
       pendingFiles = [];
       out();
       finishTurn(text, result);

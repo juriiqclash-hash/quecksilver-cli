@@ -792,12 +792,13 @@ function moveTo(row, col = 1) {
 // (new content + erased remainder) avoids the "blank, then redraw" flash
 // a clear-then-write sequence produces.
 const ERASE_EOL = `${ESC}K`;
-// The footer's own width — matches the welcome panel/message bar's own
-// {min:80,max:200} elsewhere in this file. The default terminalWidth()
-// (max 120) was narrower than that, so on any terminal wider than 120
-// columns the input rule and status line visibly stopped short of the
-// panel's own right edge above them instead of lining up with it.
-const footerWidth = () => terminalWidth({ min: 80, max: 200 });
+// The footer's own width — matches index.js's FULL_WIDTH ({min:80,max:400})
+// used for the welcome panel/message bar, so the input rule and status
+// line always line up with the panel's own right edge above them instead
+// of stopping short (the default terminalWidth() max of 120, and even an
+// earlier max of 200, were both narrower than real wide terminals/small
+// fonts commonly report).
+const footerWidth = () => terminalWidth({ min: 80, max: 400 });
 
 export function createChatDock() {
   let regionBottom = Math.max(1, (process.stdout.rows || 24) - FOOTER_ROWS); // content viewport = rows 1..regionBottom
@@ -805,7 +806,7 @@ export function createChatDock() {
   let engaged = false; // engage() has run: geometry is real, footer has content to show
   let exitHookInstalled = false;
   let contentLines = []; // the dock's own scrollback — every committed line, oldest first
-  let stagingLine = null; // an uncommitted trailing line (the spinner) shown appended after contentLines, replaced wholesale on every tick instead of growing the real log
+  let stagingLines = []; // uncommitted trailing lines (spinner tick, or a reply streaming in) shown appended after contentLines, replaced wholesale on every update instead of growing the real log
   let scrollOffset = 0; // lines back from the live tail; 0 = pinned to the latest content
   let buf = '';
   let pendingResolve = null;
@@ -860,7 +861,7 @@ export function createChatDock() {
   // one string and written once, same reasoning as footerFrame() above.
   const redrawContent = () => {
     if (!engaged) return;
-    const all = stagingLine !== null ? contentLines.concat([stagingLine]) : contentLines;
+    const all = stagingLines.length ? contentLines.concat(stagingLines) : contentLines;
     const h = regionBottom;
     const maxOffset = Math.max(0, all.length - h);
     if (scrollOffset > maxOffset) scrollOffset = maxOffset;
@@ -1015,23 +1016,25 @@ export function createChatDock() {
     // UI auto-scrolls on new content), and redraws.
     print(text = '') {
       if (!engaged) { console.log(text); return; }
-      stagingLine = null;
+      stagingLines = [];
       String(text).split('\n').forEach((line) => contentLines.push(line));
       scrollOffset = 0;
       redrawContent();
     },
-    // Shows `text` as an uncommitted trailing line — appended after
-    // whatever's already committed, replaced wholesale on every call
-    // instead of growing the real log. Built for the spinner (see
-    // spinner() below): each tick just re-stages its current frame.
+    // Shows `text` (one line, or several — split the same way print() does)
+    // as uncommitted trailing lines, appended after whatever's already
+    // committed and replaced wholesale on every call instead of growing
+    // the real log. Used for the spinner (see spinner() below: each tick
+    // re-stages its current frame) and for a reply streaming in live
+    // (each chunk re-stages the whole reply so far, formatted).
     setEphemeral(text) {
       if (!engaged) return;
-      stagingLine = text;
+      stagingLines = String(text).split('\n');
       redrawContent();
     },
     clearEphemeral() {
-      if (!engaged || stagingLine === null) return;
-      stagingLine = null;
+      if (!engaged || stagingLines.length === 0) return;
+      stagingLines = [];
       redrawContent();
     },
     // A startThinkingSpinner()-alike that renders through the dock's own
