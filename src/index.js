@@ -9,8 +9,8 @@ import {
 import { runLoginFlow } from './auth.js';
 import {
   c, mascot, logoArt, twoColumnBox, terminalWidth, clearScreen,
-  centerBlock, visibleLength, startThinkingSpinner, openPath, readBoxedInput,
-  padToBottom, waitBriefly, wrapText, renderMarkdown, userMessageBlock,
+  centerBlock, visibleLength, startThinkingSpinner, openPath, createChatDock,
+  waitBriefly, wrapText, renderMarkdown, userMessageBlock,
 } from './ui.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -30,12 +30,14 @@ const ASSISTANT_MARK = c('● ', 'steelBlue');
 
 // Formats a reply's Markdown into clean ANSI and prints it with the
 // assistant marker on its first line only; `mark` defaults to '' for the
-// scripting-adjacent one-off paths that never showed a speaker label.
-function printReply(text, { mark = '' } = {}) {
+// scripting-adjacent one-off paths that never showed a speaker label, and
+// `log` defaults to console.log for those same paths (interactiveChat
+// passes its docked footer's print() instead).
+function printReply(text, { mark = '', log = console.log } = {}) {
   const width = terminalWidth({ min: 60, max: 100 });
   const lines = renderMarkdown(text, width).split('\n');
-  console.log('\n' + mark + (lines[0] ?? ''));
-  lines.slice(1).forEach((l) => console.log(l));
+  log('\n' + mark + (lines[0] ?? ''));
+  lines.slice(1).forEach((l) => log(l));
 }
 
 // Every slash command recognized inside interactiveChat's input loop
@@ -199,31 +201,35 @@ function parseSettingValue(raw) {
   return raw;
 }
 
-function printSettings(settings) {
-  console.log(c('Settings:', 'gray'));
+// `log` defaults to plain console.log for the top-level (non-chat) call
+// sites; interactiveChat passes its docked footer's print() instead, since
+// a raw console.log while the chat's fixed-bottom scroll region is active
+// would land in the footer rows instead of the scrolling conversation area.
+function printSettings(settings, log = console.log) {
+  log(c('Settings:', 'gray'));
   for (const [key, value] of Object.entries(settings)) {
-    console.log(c(`  ${key} = ${value}`, 'gray'));
+    log(c(`  ${key} = ${value}`, 'gray'));
   }
 }
 
-async function printUsage(token) {
+async function printUsage(token, log = console.log) {
   const account = await fetchAccountInfo(token);
   const plan = account.isPro ? 'QueckSilver Pro' : 'QueckSilver Free';
-  console.log(c(`Plan: ${plan}`, 'gray'));
+  log(c(`Plan: ${plan}`, 'gray'));
   try {
     const res = await fetch(`${SUPABASE_URL}/functions/v1/check-usage`, {
       headers: { Authorization: `Bearer ${token}`, apikey: SUPABASE_ANON_KEY },
     });
     if (res.ok) {
       const data = await res.json();
-      console.log(c(`Service status: ${data.sleeping ? 'temporarily limited (daily budget reached)' : 'normal'} (${data.percentUsed}% of today's shared budget used)`, 'gray'));
+      log(c(`Service status: ${data.sleeping ? 'temporarily limited (daily budget reached)' : 'normal'} (${data.percentUsed}% of today's shared budget used)`, 'gray'));
     } else {
-      console.log(c(`(Service status unavailable: HTTP ${res.status})`, 'gray'));
+      log(c(`(Service status unavailable: HTTP ${res.status})`, 'gray'));
     }
   } catch {
     // Best-effort — usage info just won't show if this fails.
   }
-  console.log(c('CLI rate limits: 10 chat requests / min, 20 generations (image/document/music) / 15 min.', 'gray'));
+  log(c('CLI rate limits: 10 chat requests / min, 20 generations (image/document/music) / 15 min.', 'gray'));
 }
 
 // Simple numeric-segment comparison — good enough for x.y.z versions,
@@ -330,14 +336,14 @@ function saveAttachments(attachments, { open } = {}) {
   return saved;
 }
 
-function printSources(sources) {
+function printSources(sources, log = console.log) {
   if (!sources || sources.length === 0) return;
-  console.log(c('Sources:', 'gray'));
-  sources.forEach((s, i) => console.log(c(`  [${i + 1}] ${s.title} — ${s.url}`, 'gray')));
+  log(c('Sources:', 'gray'));
+  sources.forEach((s, i) => log(c(`  [${i + 1}] ${s.title} — ${s.url}`, 'gray')));
 }
 
-function printSavedPaths(paths) {
-  paths.forEach((p) => console.log(c(`Saved: ${p}`, 'gray')));
+function printSavedPaths(paths, log = console.log) {
+  paths.forEach((p) => log(c(`Saved: ${p}`, 'gray')));
 }
 
 // Full command reference — shown on demand via /commands (in-chat) or
@@ -382,13 +388,13 @@ const COMMAND_SECTIONS = [
 // Command tokens print in blue, descriptions in gray — same visual split as
 // the live /-highlighting while typing, so the reference list and the live
 // input use the same "this is a command" color language.
-export function printCommandList() {
+export function printCommandList(log = console.log) {
   const colWidth = Math.max(...COMMAND_SECTIONS.flatMap((s) => s.rows.map(([cmd]) => cmd.length))) + 2;
   COMMAND_SECTIONS.forEach((section, i) => {
-    if (i > 0) console.log();
-    console.log(c(section.heading, 'gray'));
+    if (i > 0) log();
+    log(c(section.heading, 'gray'));
     section.rows.forEach(([cmd, desc]) => {
-      console.log(`  ${c(cmd.padEnd(colWidth), 'blue')}${c(desc, 'gray')}`);
+      log(`  ${c(cmd.padEnd(colWidth), 'blue')}${c(desc, 'gray')}`);
     });
   });
 }
@@ -443,8 +449,8 @@ function quickTipsLines(maxWidth) {
 // the welcome panel (tips live inside the panel itself now) — a plain
 // intro to what this CLI is, styled with a left accent bar like Claude
 // Code's own release-notes callout, ending in a link to the full docs.
-// Returns how many terminal lines it used, so the caller can fold that
-// into its running line count for padToBottom.
+// Returns how many terminal lines it used, so the caller can size the
+// intro block it's part of (see introStartRow in interactiveChat).
 const ABOUT_TEXT = 'QueckSilver CLI brings QueckSilver AI (Zora) into your terminal: chat, '
   + 'attach files, generate images and documents, or run one-off prompts without leaving your shell.';
 
@@ -572,7 +578,7 @@ async function askQuecksilver(prompt, history, token, files = [], { quiet = fals
 // waiting for the full reply. Used for the normal (non --json) terminal UX;
 // --json keeps using the buffered askQuecksilver above since a single JSON
 // blob is simpler and more robust to parse for scripting.
-async function askQuecksilverStream(prompt, history, token, files = [], { prefix = '' } = {}) {
+async function askQuecksilverStream(prompt, history, token, files = [], { prefix = '', log = console.log } = {}) {
   const spinner = startThinkingSpinner();
   const start = Date.now();
 
@@ -642,7 +648,7 @@ async function askQuecksilverStream(prompt, history, token, files = [], { prefix
 
       if (evt.error) {
         stopSpinner();
-        console.error(c(`Error: ${evt.error}`, 'red'));
+        log(c(`Error: ${evt.error}`, 'red'));
       } else if (evt.text) {
         fullReply += evt.text;
       } else if (evt.done) {
@@ -652,11 +658,11 @@ async function askQuecksilverStream(prompt, history, token, files = [], { prefix
   }
 
   stopSpinner();
-  if (fullReply) printReply(fullReply, { mark: prefix });
+  if (fullReply) printReply(fullReply, { mark: prefix, log });
 
   const elapsed = Math.max(1, Math.round((Date.now() - start) / 1000));
   const tokenPart = final?.usage?.totalTokens ? ` · ${final.usage.totalTokens} tokens` : '';
-  console.log(c(`✓ thought for ${elapsed}s${tokenPart}`, 'dim'));
+  log(c(`✓ thought for ${elapsed}s${tokenPart}`, 'dim'));
 
   return {
     reply: fullReply || '(no reply received)',
@@ -710,19 +716,17 @@ async function oneOffForcedTool(forceTool, token, { files = [], output, json, op
   }
 }
 
-async function interactiveChat(token, { files = [], open, initialHistory = [], usedLines = 0, account = null } = {}) {
-  let lines = usedLines;
-
-  // Everything printed before the person's first real message (the welcome
-  // panel/logo above, the "Type your message..." hint, the about blurb) is
-  // static — it's drawn once and never touched again. A terminal zoom
-  // changes column/row count exactly like a window resize does, but
-  // nothing was redrawing this header on that event, so the terminal's own
-  // reflow of that already-printed text corrupted the logo and clipped the
-  // quick-tips column. `redrawHeader` reprints this whole block fresh at
-  // the new size; it's wired up below and switched off the moment the
-  // first real input arrives, since after that this text is genuine chat
-  // history that shouldn't be wiped and replaced by a fresh header.
+async function interactiveChat(token, { files = [], open, initialHistory = [], usedLines = 0 } = {}) {
+  // The welcome panel (mascot, model/plan/version/dir, quick tips) above
+  // this point is permanent — it's never cleared or redrawn again, it just
+  // scrolls off naturally as the conversation grows, same as any other
+  // line of chat history. Only the short "Type your message..."/"This is
+  // QueckSilver CLI" onboarding blurb printed below it is meant to go away
+  // once real chatting starts; `introStartRow` is exactly the terminal row
+  // that blurb begins on (`usedLines` is how many rows the panel already
+  // used since the session's one clearScreen()), so it can be wiped on its
+  // own via dock.clearFrom() below without touching the panel above it.
+  const introStartRow = usedLines + 1;
   let headerActive = true;
   const printIntro = () => {
     console.log(c('Type your message and press Enter to chat. Type "exit" to quit, or /commands to see everything else you can do.', 'gray'));
@@ -739,35 +743,33 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], u
     }
     return n;
   };
-  const resizeCoordinator = { justRedrew: false };
-  const redrawHeader = () => {
-    if (!headerActive) return;
-    lines = account ? printWelcomePanel(account) : 0;
-    lines += printIntro();
-    padToBottom(lines, { reserve: 4 });
-    resizeCoordinator.justRedrew = true;
-  };
-  if (account) process.stdout.on('resize', redrawHeader);
 
   const STATUS_TEXT = 'QueckSilver CLI • Powered by Zora';
   const history = [...initialHistory];
-  lines += printIntro();
+  printIntro();
   let pendingFiles = files;
   let pendingOutput = null;
   let sessionOpen = open ?? getSetting('autoOpen');
 
   const stripQuotes = (s) => s.trim().replace(/^"(.*)"$/, '$1');
 
+  // Everything printed once the chat is running goes through the dock —
+  // it's the docked footer's scroll region above it, not "wherever the
+  // cursor happens to be" — so the input box (and the welcome panel above
+  // it) are never at risk of being overwritten by a stray plain console.log.
+  const dock = createChatDock();
+  const out = (s = '') => dock.print(s);
+
   // Shared tail for both the forced-tool and normal chat paths: print
   // sources/saved attachments, honor a queued /output path, record the turn
   // in history so follow-up questions can reference it, and persist the
   // growing history so --continue/-c can pick it up later.
   const finishTurn = (text, result) => {
-    printSources(result.sources);
-    printSavedPaths(saveAttachments(result.attachments, { open: sessionOpen }));
+    printSources(result.sources, out);
+    printSavedPaths(saveAttachments(result.attachments, { open: sessionOpen }), out);
     if (pendingOutput) {
       writeFileSync(pendingOutput, result.reply, 'utf-8');
-      console.log(c(`Saved reply to ${pendingOutput}`, 'gray'));
+      out(c(`Saved reply to ${pendingOutput}`, 'gray'));
       pendingOutput = null;
     }
     history.push({ role: 'user', text });
@@ -776,37 +778,27 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], u
   };
 
   // Same terminalWidth() range the welcome panel above used for its own
-  // `total`, so the input box lines up edge-to-edge with it instead of a
-  // narrower default width leaving it looking cut short.
+  // `total`, so the user-message bar lines up edge-to-edge with it instead
+  // of a narrower default width leaving it looking cut short.
   const chatWidth = terminalWidth({ min: 80, max: 200 });
 
-  // Draws the input as a real box — rule, typed text, rule, status line —
-  // and resolves with whatever was typed. See readBoxedInput() in ui.js for
-  // why this replaced the old readline-based prompt.
-  const promptNext = () => readBoxedInput({ width: chatWidth, statusText: STATUS_TEXT, knownCommands: KNOWN_SLASH_COMMANDS, resizeCoordinator });
-
-  // readBoxedInput always draws exactly 4 rows (rule, input, rule, status)
-  // — reserve that many so the box's own bottom rule lands flush against
-  // the terminal's last row instead of floating right after whatever was
-  // printed above it.
-  padToBottom(lines, { reserve: 4 });
+  dock.start();
 
   while (true) {
-    const line = await promptNext();
+    const line = await dock.input({ statusText: STATUS_TEXT, knownCommands: KNOWN_SLASH_COMMANDS });
     const text = line.trim();
     if (!text) continue;
     if (headerActive) {
-      // The welcome panel/logo, the "type your message" hint, and the
-      // "This is QueckSilver CLI" callout are onboarding chrome, not part
-      // of the conversation — the first real message clears them the same
-      // way Claude Code's own splash gives way to the chat transcript,
-      // instead of leaving them sitting above it forever.
+      // Only the "type your message"/"This is QueckSilver CLI" blurb goes
+      // away here — the welcome panel above `introStartRow` is untouched,
+      // and the input box itself (already reset to its empty/placeholder
+      // state by dock.input() above) is outside the cleared range entirely,
+      // so it never disappears or flickers even for this first turn.
       headerActive = false;
-      process.stdout.removeListener('resize', redrawHeader);
-      clearScreen();
+      dock.clearFrom(introStartRow);
     }
-    console.log(userMessageBlock(text, chatWidth));
-    console.log();
+    out(userMessageBlock(text, chatWidth));
+    out();
     if (text === 'exit' || text === 'quit') break;
 
     const fileCmd = text.match(/^\/(?:file|attach)\s+(.+)$/i);
@@ -815,9 +807,9 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], u
       try {
         const [attached] = readAttachments([rawPath]);
         pendingFiles = [...pendingFiles, attached];
-        console.log(c(`Attached: ${attached.name} (will be sent with your next message)`, 'gray'));
+        out(c(`Attached: ${attached.name} (will be sent with your next message)`, 'gray'));
       } catch (err) {
-        console.log(c(err.message, 'red'));
+        out(c(err.message, 'red'));
       }
       continue;
     }
@@ -825,23 +817,23 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], u
     const outputCmd = text.match(/^\/output\s+(.+)$/i);
     if (outputCmd) {
       pendingOutput = stripQuotes(outputCmd[1]);
-      console.log(c(`Your next reply will also be saved to ${pendingOutput}`, 'gray'));
+      out(c(`Your next reply will also be saved to ${pendingOutput}`, 'gray'));
       continue;
     }
 
     if (/^\/open$/i.test(text)) {
       sessionOpen = !sessionOpen;
-      console.log(c(`Auto-open is now ${sessionOpen ? 'on' : 'off'} for this session.`, 'gray'));
+      out(c(`Auto-open is now ${sessionOpen ? 'on' : 'off'} for this session.`, 'gray'));
       continue;
     }
 
     if (/^\/continue$/i.test(text)) {
       const previous = loadLastSession();
       if (previous.length === 0) {
-        console.log(c('No previous session found.', 'gray'));
+        out(c('No previous session found.', 'gray'));
       } else {
         history.unshift(...previous);
-        console.log(c(`Loaded ${previous.length / 2} previous turn(s) into this conversation.`, 'gray'));
+        out(c(`Loaded ${previous.length / 2} previous turn(s) into this conversation.`, 'gray'));
       }
       continue;
     }
@@ -850,20 +842,20 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], u
     if (configCmd) {
       if (configCmd[1]) {
         setSetting(configCmd[1], parseSettingValue(configCmd[2]));
-        console.log(c(`${configCmd[1]} = ${configCmd[2]}`, 'gray'));
+        out(c(`${configCmd[1]} = ${configCmd[2]}`, 'gray'));
       } else {
-        printSettings(getAllSettings());
+        printSettings(getAllSettings(), out);
       }
       continue;
     }
 
     if (/^\/usage$/i.test(text)) {
-      await printUsage(token);
+      await printUsage(token, out);
       continue;
     }
 
     if (/^\/(?:commands|help)$/i.test(text)) {
-      printCommandList();
+      printCommandList(out);
       continue;
     }
 
@@ -884,26 +876,27 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], u
       try {
         const result = await askForcedTool(forceTool, token, pendingFiles);
         pendingFiles = [];
-        printReply(result.reply, { mark: ASSISTANT_MARK });
-        console.log();
+        printReply(result.reply, { mark: ASSISTANT_MARK, log: out });
+        out();
         finishTurn(text, result);
       } catch (err) {
-        console.error(c(`Connection error: ${err.message}`, 'red'));
+        out(c(`Connection error: ${err.message}`, 'red'));
       }
       continue;
     }
 
     try {
-      const result = await askQuecksilverStream(text, history, token, pendingFiles, { prefix: ASSISTANT_MARK });
+      const result = await askQuecksilverStream(text, history, token, pendingFiles, { prefix: ASSISTANT_MARK, log: out });
       pendingFiles = [];
-      console.log();
+      out();
       finishTurn(text, result);
     } catch (err) {
-      console.error(c(`Connection error: ${err.message}`, 'red'));
+      out(c(`Connection error: ${err.message}`, 'red'));
     }
   }
 
-  console.log('\nSee you soon!');
+  out('\nSee you soon!');
+  dock.stop();
   process.exit(0);
 }
 
@@ -960,7 +953,7 @@ async function startSession(token, options) {
       files, output: options.output, json: options.json, open: options.open, history: continuedHistory,
     });
   } else {
-    await interactiveChat(token, { files, open: options.open, initialHistory: continuedHistory, usedLines, account });
+    await interactiveChat(token, { files, open: options.open, initialHistory: continuedHistory, usedLines });
   }
 }
 

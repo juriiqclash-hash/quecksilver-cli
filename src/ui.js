@@ -335,20 +335,6 @@ export function renderMarkdown(text, width) {
   return out.join('\n');
 }
 
-// Pads with blank lines so whatever prints right after lands on the
-// terminal's bottom row instead of trailing right after the welcome panel
-// with a wall of unused space below it — `usedLines` is how many terminal
-// rows the caller has already printed since the last clearScreen(), and
-// `reserve` is how many more rows the caller is about to print itself
-// (e.g. the divider + the input row). No-ops when stdout isn't a real TTY
-// or the content already fills (or exceeds) the terminal.
-export function padToBottom(usedLines, { reserve = 2 } = {}) {
-  if (!process.stdout.isTTY) return;
-  const rows = process.stdout.rows || 24;
-  const blanks = rows - usedLines - reserve;
-  for (let i = 0; i < blanks; i++) console.log();
-}
-
 // Turns a named color into its background-color escape (same RGB triplet,
 // "48;2;" instead of "38;2;") — used by the half-block mascot renderer
 // below, where one glyph needs a foreground color for its top pixel and a
@@ -735,175 +721,183 @@ export function enableSlashCommandHighlight(rl, promptColored, knownCommands) {
   });
 }
 
-// Renders the chat input as a genuine box — a full-width rule above and
-// below the typed text, with a slim status line underneath — and lets the
-// person type in the space between the two rules, like a real input field
-// rather than a single rule sitting above a plain readline prompt.
+// ---- Fixed-bottom chat dock ---------------------------------------------
 //
-// Node's built-in readline has no way to keep content *below* the active
-// line alive across edits — it always redraws from its own cursor position
-// downward, wiping anything drawn after it on every keystroke (including
-// backspace). So instead of readline, this owns raw stdin directly and
-// redraws all four lines itself every time the buffer changes.
-//
-// `knownCommands` gets the same live blue highlight as the old
-// enableSlashCommandHighlight() did: the "/word" token turns blue the
-// moment it's an exact match, and reverts to plain the instant it isn't.
-export function readBoxedInput({ width, statusText, knownCommands = [], resizeCoordinator } = {}) {
-  return new Promise((resolve) => {
-    // `w` used to be frozen for the life of the box, so resizing the
-    // window (bigger or smaller) left it drawn at a stale width forever —
-    // it's mutable now so the resize handler below can update it live.
-    let w = width || terminalWidth();
-    const placeholder = 'Try "/commands" to see what you can do';
-    const known = new Set(knownCommands.map((k) => k.toLowerCase()));
-    let buf = '';
-    let firstDraw = true;
-    // Some terminals (Windows Terminal / conpty in particular) can feed a
-    // burst of extra input around a resize. As a safety net, a Return
-    // with an empty buffer arriving within this window after a resize is
-    // treated as resize noise rather than a real submit — a real person
-    // is very unlikely to press Enter on an empty box within a fraction
-    // of a second of dragging the window edge.
-    let suppressEmptyEnterUntil = 0;
+// A permanent input box pinned to the terminal's last `FOOTER_ROWS` rows —
+// conversation text prints into the region above it and scrolls there on
+// its own (via a real VT100 scroll region, DECSTBM), while the box itself
+// is redrawn with absolute cursor addressing straight into the reserved
+// rows below the region. That split is what makes it "fixed": no matter
+// how much has scrolled past above, or how the previous turn's box was
+// drawn, the box's own row numbers never move — the same technique
+// full-screen tools like tmux's status line or htop's header use for a
+// footer/header that survives arbitrary content scrolling past it.
+const FOOTER_ROWS = 4;
 
-    const highlightedBuf = () => {
-      const match = buf.match(/^(\/\S*)([\s\S]*)$/);
-      if (match && known.has(match[1].slice(1).toLowerCase())) {
-        return c(match[1], 'blue') + match[2];
+function setScrollRegion(top, bottom) {
+  process.stdout.write(`${ESC}${top};${bottom}r`);
+}
+function resetScrollRegion() {
+  process.stdout.write(`${ESC}r`);
+}
+function moveTo(row, col = 1) {
+  process.stdout.write(`${ESC}${row};${col}H`);
+}
+
+export function createChatDock() {
+  let rows = process.stdout.rows || 24;
+  let regionBottom = Math.max(1, rows - FOOTER_ROWS);
+  let active = false;
+  let exitHookInstalled = false;
+
+  const applyRegion = () => {
+    rows = process.stdout.rows || 24;
+    regionBottom = Math.max(1, rows - FOOTER_ROWS);
+    setScrollRegion(1, regionBottom);
+  };
+
+  return {
+    start() {
+      if (!process.stdout.isTTY) return;
+      active = true;
+      applyRegion();
+      // A scroll region is terminal-wide state that outlives this process
+      // if left set — whatever runs in the shell next would inherit a
+      // window with its bottom rows walled off. This is a last-resort net
+      // for exits that skip stop() (an uncaught error, a raw process.exit
+      // elsewhere in the app); resetScrollRegion() is harmless to call
+      // even when nothing is actually confined.
+      if (!exitHookInstalled) {
+        exitHookInstalled = true;
+        process.once('exit', () => resetScrollRegion());
       }
-      return buf;
-    };
-
-    const statusLine = () => {
-      const label = statusText || '';
-      const pad = Math.max(0, w - label.length);
-      return ' '.repeat(pad) + c(label, 'dim');
-    };
-
-    const render = () => {
-      const rule = divider(w);
-      const shown = buf ? highlightedBuf() : c(placeholder, 'dim');
-      return [rule, c('› ', 'steelBlue') + shown, rule, statusLine()];
-    };
-
-    const draw = () => {
-      // After every draw, the cursor is always parked at the start of the
-      // input row (see the bottom of this function), never further down —
-      // so getting back up to the top rule to redraw always means going up
-      // exactly 1 row, no matter how many draws have already happened.
-      // Treating this as "go up 4" (the whole box height) was the bug: it
-      // walked the cursor further up than the box actually starts on every
-      // redraw after the first, so each keystroke drew a fresh copy of the
-      // box one row higher than the last instead of overwriting it in place.
-      if (!firstDraw) {
-        readline.moveCursor(process.stdout, 0, -1);
-        readline.cursorTo(process.stdout, 0);
-      }
-      firstDraw = false;
-      // Newlines go *between* lines, not after the last one — a trailing
-      // newline after the status line asks the terminal for a row past the
-      // box's last one, which forces a scroll (shifting everything above
-      // it up by one line) whenever the box sits flush against the
-      // terminal's bottom edge. Every earlier redraw already left the
-      // cursor short of that trailing newline (see below), so omitting it
-      // here keeps redraws from ever needing to create a new row.
-      const renderedLines = render();
-      renderedLines.forEach((line, i) => {
+    },
+    stop() {
+      if (!active) return;
+      active = false;
+      resetScrollRegion();
+    },
+    resize() {
+      if (!active) return;
+      applyRegion();
+    },
+    // Wipes rows [row, regionBottom] — i.e. everything in the scrolling
+    // region from `row` down to its own bottom edge — without touching
+    // anything in the reserved footer rows below it. Used to clear a
+    // specific onboarding block (the "Type your message..." hint) once
+    // real chatting starts, while the box itself and whatever was printed
+    // above `row` (the welcome panel) are left completely alone.
+    clearFrom(row) {
+      if (!active) return;
+      for (let r = row; r <= regionBottom; r++) {
+        moveTo(r, 1);
         readline.clearLine(process.stdout, 0);
-        process.stdout.write(line);
-        if (i < renderedLines.length - 1) process.stdout.write('\n');
+      }
+      moveTo(regionBottom, 1);
+    },
+    // Prints a (possibly multi-line) block into the scrolling region above
+    // the dock, each line ending in its own newline so DECSTBM scrolls the
+    // region exactly like a normal terminal would scroll a full screen.
+    print(text = '') {
+      if (!active) { console.log(text); return; }
+      moveTo(regionBottom, 1);
+      String(text).split('\n').forEach((line) => {
+        readline.clearLine(process.stdout, 0);
+        process.stdout.write(line + '\n');
       });
-      // Cursor is now at the end of the status line (row 3 of the 4 just
-      // drawn, no trailing newline) — move back up 2 to land on the input
-      // row, then park the cursor right after the typed text.
-      readline.moveCursor(process.stdout, 0, -2);
-      readline.cursorTo(process.stdout, 2 + buf.length);
-    };
+    },
+    // Draws the box — rule, typed text, rule, status line — in the
+    // reserved footer rows and resolves with whatever was typed once
+    // Enter is pressed. Unlike the old per-turn box this replaces, the box
+    // is never torn down on submit: it resets to its empty/placeholder
+    // state and stays put, ready for the next turn, while the submitted
+    // text and the reply print into the scrolling region above via
+    // print() — same "always there" input field a normal chat UI has.
+    input({ statusText, knownCommands = [] } = {}) {
+      return new Promise((resolve) => {
+        const placeholder = 'Try "/commands" to see what you can do';
+        const known = new Set(knownCommands.map((k) => k.toLowerCase()));
+        let buf = '';
 
-    const stdin = process.stdin;
-    const wasRaw = stdin.isRaw;
-    readline.emitKeypressEvents(stdin);
-    if (stdin.setRawMode) stdin.setRawMode(true);
-    stdin.resume();
+        const highlightedBuf = () => {
+          const match = buf.match(/^(\/\S*)([\s\S]*)$/);
+          if (match && known.has(match[1].slice(1).toLowerCase())) {
+            return c(match[1], 'blue') + match[2];
+          }
+          return buf;
+        };
 
-    const cleanup = () => {
-      stdin.removeListener('keypress', onKeypress);
-      process.stdout.removeListener('resize', onResize);
-      if (stdin.setRawMode) stdin.setRawMode(wasRaw ?? false);
-    };
+        const drawFooter = () => {
+          const w = terminalWidth();
+          const rule = divider(w);
+          const shown = buf ? highlightedBuf() : c(placeholder, 'dim');
+          const label = statusText || '';
+          const statusPad = ' '.repeat(Math.max(0, w - label.length));
+          const lines = [rule, c('› ', 'steelBlue') + shown, rule, statusPad + c(label, 'dim')];
+          const top = regionBottom + 1;
+          lines.forEach((line, i) => {
+            moveTo(top + i, 1);
+            readline.clearLine(process.stdout, 0);
+            process.stdout.write(line);
+          });
+          moveTo(top + 1, 3 + buf.length);
+        };
 
-    const onKeypress = (str, key) => {
-      if (key && key.ctrl && key.name === 'c') {
-        cleanup();
-        process.stdout.write('\n');
-        process.exit(0);
-        return;
-      }
-      if (key && (key.name === 'return' || key.name === 'enter')) {
-        if (!buf && Date.now() < suppressEmptyEnterUntil) return;
-        cleanup();
-        // Erase the whole box (rule/input/rule/status) instead of leaving
-        // it behind as scrollback chrome — the caller replaces it with a
-        // clean highlighted echo of what was submitted (userMessageBlock
-        // above), so the transcript reads like a normal chat log rather
-        // than a stack of leftover input boxes. Same up-1-then-clear-down
-        // move the resize handler below uses, since the cursor is in the
-        // same "parked on the input row" spot in both cases.
-        readline.moveCursor(process.stdout, 0, -1);
-        readline.cursorTo(process.stdout, 0);
-        readline.clearScreenDown(process.stdout);
-        resolve(buf);
-        return;
-      }
-      if (key && key.name === 'backspace') {
-        buf = buf.slice(0, -1);
-        draw();
-        return;
-      }
-      if (str && !key.ctrl && !key.meta) {
-        buf += str;
-        draw();
-      }
-    };
+        const stdin = process.stdin;
+        const wasRaw = stdin.isRaw;
+        readline.emitKeypressEvents(stdin);
+        if (stdin.setRawMode) stdin.setRawMode(true);
+        stdin.resume();
 
-    // The terminal has already reflowed whatever text was on screen the
-    // instant it resized — that part is outside this function's control.
-    // What *is* in our control is making sure the box itself recovers:
-    // pick up the new width, wipe anything left over from the old size
-    // (clearScreenDown, since we can't know how many rows the old box
-    // now occupies after reflow), and redraw clean at the new size.
-    const onResize = () => {
-      w = terminalWidth();
-      suppressEmptyEnterUntil = Date.now() + 300;
-      // If something above us (the welcome panel/logo, while it's still
-      // showing) already did a full clear + reprint for this exact resize
-      // event, the cursor is already sitting exactly where the box should
-      // start — cleaning up here too would fight over the same region and
-      // misalign things. Just draw fresh in that case.
-      if (resizeCoordinator && resizeCoordinator.justRedrew) {
-        resizeCoordinator.justRedrew = false;
-        firstDraw = true;
-        draw();
-        return;
-      }
-      // draw() always leaves the cursor parked one row below the box's own
-      // top rule (see the "go up 1" comment above) — so before wiping the
-      // box we need that same up-1 step first. Without it, only the input
-      // row downward gets cleared, and the box's original top rule is left
-      // behind, orphaned, while a full fresh box is drawn one row below it
-      // — exactly the stray extra divider line seen after a resize.
-      readline.moveCursor(process.stdout, 0, -1);
-      readline.cursorTo(process.stdout, 0);
-      readline.clearScreenDown(process.stdout);
-      firstDraw = true;
-      draw();
-    };
+        const cleanup = () => {
+          stdin.removeListener('keypress', onKeypress);
+          process.stdout.removeListener('resize', onResize);
+          if (stdin.setRawMode) stdin.setRawMode(wasRaw ?? false);
+        };
 
-    draw();
-    stdin.on('keypress', onKeypress);
-    process.stdout.on('resize', onResize);
-  });
+        const onKeypress = (str, key) => {
+          if (key && key.ctrl && key.name === 'c') {
+            cleanup();
+            resetScrollRegion();
+            process.stdout.write('\n');
+            process.exit(0);
+            return;
+          }
+          if (key && (key.name === 'return' || key.name === 'enter')) {
+            cleanup();
+            const submitted = buf;
+            buf = '';
+            drawFooter();
+            resolve(submitted);
+            return;
+          }
+          if (key && key.name === 'backspace') {
+            buf = buf.slice(0, -1);
+            drawFooter();
+            return;
+          }
+          if (str && !key.ctrl && !key.meta) {
+            buf += str;
+            drawFooter();
+          }
+        };
+
+        // A physical window resize resets the terminal's scroll region to
+        // full-screen on most emulators, so both the region and the box's
+        // row numbers need recomputing from the new size — applyRegion()
+        // (via the dock's own resize()) reissues the DECSTBM for the new
+        // dimensions, then the box redraws at its new bottom-row position.
+        const onResize = () => {
+          applyRegion();
+          drawFooter();
+        };
+
+        drawFooter();
+        stdin.on('keypress', onKeypress);
+        process.stdout.on('resize', onResize);
+      });
+    },
+  };
 }
 
 // Waits for a single keypress (any key counts as "continue") without
