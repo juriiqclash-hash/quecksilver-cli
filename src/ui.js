@@ -761,9 +761,27 @@ const FOOTER_ROWS = 4;
 const ENTER_ALT_SCREEN = `${ESC}?1049h`;
 const LEAVE_ALT_SCREEN = `${ESC}?1049l`;
 
+// Returns the cursor-position escape rather than writing it directly —
+// every redraw below builds one big string out of these and writes it in
+// a single process.stdout.write() call. Issuing a separate write() per row
+// (the previous approach) let the terminal paint each row as its own
+// flush, which on most emulators shows up as visible flicker, especially
+// under the rapid-fire redraws a scroll keypress triggers; one write is
+// effectively one atomic paint.
 function moveTo(row, col = 1) {
-  process.stdout.write(`${ESC}${row};${col}H`);
+  return `${ESC}${row};${col}H`;
 }
+// Erase-to-end-of-line, used *after* writing a row's new content instead
+// of clearing the row first — going straight from the old content to
+// (new content + erased remainder) avoids the "blank, then redraw" flash
+// a clear-then-write sequence produces.
+const ERASE_EOL = `${ESC}K`;
+// The footer's own width — matches the welcome panel/message bar's own
+// {min:80,max:200} elsewhere in this file. The default terminalWidth()
+// (max 120) was narrower than that, so on any terminal wider than 120
+// columns the input rule and status line visibly stopped short of the
+// panel's own right edge above them instead of lining up with it.
+const footerWidth = () => terminalWidth({ min: 80, max: 200 });
 
 export function createChatDock() {
   let regionBottom = Math.max(1, (process.stdout.rows || 24) - FOOTER_ROWS); // content viewport = rows 1..regionBottom
@@ -792,20 +810,28 @@ export function createChatDock() {
     return buf;
   };
 
-  const drawFooter = () => {
-    if (!engaged) return;
-    const w = terminalWidth();
+  // Builds the footer's 4 rows as one escape-sequence string (not written
+  // yet) — shared by drawFooter() (a lone keystroke, where only the footer
+  // needs to change) and redrawContent() (which folds this into its own
+  // single write so a content change repaints in one atomic go too).
+  const footerFrame = () => {
+    const w = footerWidth();
     const rule = divider(w);
     const shown = buf ? highlightedBuf() : c(placeholder, 'dim');
     const statusPad = ' '.repeat(Math.max(0, w - statusText.length));
     const lines = [rule, c('› ', 'steelBlue') + shown, rule, statusPad + c(statusText, 'dim')];
     const top = regionBottom + 1;
+    let frame = '';
     lines.forEach((line, i) => {
-      moveTo(top + i, 1);
-      readline.clearLine(process.stdout, 0);
-      process.stdout.write(line);
+      frame += moveTo(top + i, 1) + line + ERASE_EOL;
     });
-    moveTo(top + 1, 3 + buf.length);
+    frame += moveTo(top + 1, 3 + buf.length);
+    return frame;
+  };
+
+  const drawFooter = () => {
+    if (!engaged) return;
+    process.stdout.write(footerFrame());
   };
 
   // Redraws the whole content viewport from whatever `regionBottom` lines
@@ -814,6 +840,8 @@ export function createChatDock() {
   // back in the input box — every content change goes through this, so
   // the blinking cursor never drifts up into the content area the way it
   // did when only the box's own keystroke handler bothered to reposition it.
+  // The whole frame (every content row plus the footer) is assembled into
+  // one string and written once, same reasoning as footerFrame() above.
   const redrawContent = () => {
     if (!engaged) return;
     const all = stagingLine !== null ? contentLines.concat([stagingLine]) : contentLines;
@@ -821,12 +849,12 @@ export function createChatDock() {
     const maxOffset = Math.max(0, all.length - h);
     if (scrollOffset > maxOffset) scrollOffset = maxOffset;
     const start = Math.max(0, all.length - h - scrollOffset);
+    let frame = '';
     for (let i = 0; i < h; i++) {
-      moveTo(i + 1, 1);
-      readline.clearLine(process.stdout, 0);
-      process.stdout.write(all[start + i] ?? '');
+      frame += moveTo(i + 1, 1) + (all[start + i] ?? '') + ERASE_EOL;
     }
-    drawFooter();
+    frame += footerFrame();
+    process.stdout.write(frame);
   };
 
   // delta > 0 reveals older lines (scroll up / PageUp), delta < 0 moves
