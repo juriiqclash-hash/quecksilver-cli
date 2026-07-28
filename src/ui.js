@@ -723,16 +723,39 @@ export function enableSlashCommandHighlight(rl, promptColored, knownCommands) {
 
 // ---- Fixed-bottom chat dock ---------------------------------------------
 //
-// A permanent input box pinned to the terminal's last `FOOTER_ROWS` rows —
-// conversation text prints into the region above it and scrolls there on
-// its own (via a real VT100 scroll region, DECSTBM), while the box itself
-// is redrawn with absolute cursor addressing straight into the reserved
-// rows below the region. That split is what makes it "fixed": no matter
-// how much has scrolled past above, or how the previous turn's box was
-// drawn, the box's own row numbers never move — the same technique
-// full-screen tools like tmux's status line or htop's header use for a
-// footer/header that survives arbitrary content scrolling past it.
+// A permanent input box pinned to the terminal's last `FOOTER_ROWS` rows,
+// with conversation text growing into the region above it. Two problems
+// a first pass at this (plain DECSTBM scroll region, one Promise per turn)
+// ran into, and how this version avoids them:
+//
+// 1. A VT100 scroll region only constrains *program-driven* scrolling
+//    (newlines). It does nothing to a terminal's own mouse-wheel/scrollbar
+//    scrollback — that's just replaying past frames of the *whole* screen,
+//    footer rows included, so scrolling up visibly dragged the box along
+//    with the conversation. The only way to keep the box's row numbers
+//    truly exempt from that is to leave the primary screen's scrollback
+//    out of the picture entirely: the dock switches to the alternate
+//    screen buffer (the same mechanism vim/htop/tmux use), which has no
+//    native scrollback to drag the footer through.
+// 2. Re-installing raw mode and a fresh keypress listener on every single
+//    turn (the old `input()`, called once per message) left a window
+//    between turns — while a reply was streaming in — where raw mode had
+//    been restored to whatever it was *before* chatting started (usually
+//    off). Anything typed during that window got echoed straight to the
+//    terminal by the OS's own cooked-mode line editing instead of by this
+//    code, landing wherever the cursor happened to be, and got flushed as
+//    a buffered burst (sometimes read as a stray Enter) the moment the
+//    next turn's listener came up — the "types show up somewhere weird,
+//    then several replies fire at once" bug. The fix is to install raw
+//    mode and the keypress listener exactly once, for the dock's entire
+//    lifetime: typing is always captured live, always redrawn into the
+//    box, and Enter only resolves a turn when one is actually pending
+//    (`pendingResolve` set) — while a reply is in flight there's nothing
+//    pending, so Enter is simply swallowed and whatever was typed just
+//    keeps sitting in the box, exactly as-is, until the next turn opens.
 const FOOTER_ROWS = 4;
+const ENTER_ALT_SCREEN = `${ESC}?1049h`;
+const LEAVE_ALT_SCREEN = `${ESC}?1049l`;
 
 function setScrollRegion(top, bottom) {
   process.stdout.write(`${ESC}${top};${bottom}r`);
@@ -747,8 +770,15 @@ function moveTo(row, col = 1) {
 export function createChatDock() {
   let rows = process.stdout.rows || 24;
   let regionBottom = Math.max(1, rows - FOOTER_ROWS);
-  let active = false;
+  let active = false; // alternate screen entered, raw mode + listeners live
+  let engaged = false; // engage() has run: scroll region set, footer has real geometry
   let exitHookInstalled = false;
+  let nextRow = 1;
+  let buf = '';
+  let pendingResolve = null;
+  let statusText = '';
+  let known = new Set();
+  let wasRaw = false;
 
   const applyRegion = () => {
     rows = process.stdout.rows || 24;
@@ -756,148 +786,171 @@ export function createChatDock() {
     setScrollRegion(1, regionBottom);
   };
 
-  return {
+  const placeholder = 'Try "/commands" to see what you can do';
+  const highlightedBuf = () => {
+    const match = buf.match(/^(\/\S*)([\s\S]*)$/);
+    if (match && known.has(match[1].slice(1).toLowerCase())) {
+      return c(match[1], 'blue') + match[2];
+    }
+    return buf;
+  };
+
+  const drawFooter = () => {
+    if (!engaged) return;
+    const w = terminalWidth();
+    const rule = divider(w);
+    const shown = buf ? highlightedBuf() : c(placeholder, 'dim');
+    const statusPad = ' '.repeat(Math.max(0, w - statusText.length));
+    const lines = [rule, c('› ', 'steelBlue') + shown, rule, statusPad + c(statusText, 'dim')];
+    const top = regionBottom + 1;
+    lines.forEach((line, i) => {
+      moveTo(top + i, 1);
+      readline.clearLine(process.stdout, 0);
+      process.stdout.write(line);
+    });
+    moveTo(top + 1, 3 + buf.length);
+  };
+
+  const leaveScreen = () => {
+    resetScrollRegion();
+    process.stdout.write(LEAVE_ALT_SCREEN);
+    if (process.stdin.setRawMode) process.stdin.setRawMode(wasRaw ?? false);
+  };
+
+  const onKeypress = (str, key) => {
+    if (!active) return;
+    if (key && key.ctrl && key.name === 'c') {
+      dock.stop();
+      process.stdout.write('\n');
+      process.exit(0);
+      return;
+    }
+    if (key && (key.name === 'return' || key.name === 'enter')) {
+      // No turn is currently pending — either still on the welcome screen
+      // before engage(), or a reply is actively streaming in. Either way,
+      // this Enter has nothing to submit to; swallow it rather than losing
+      // or misapplying whatever's already been typed.
+      if (!pendingResolve) return;
+      const submitted = buf;
+      buf = '';
+      const resolve = pendingResolve;
+      pendingResolve = null;
+      drawFooter();
+      resolve(submitted);
+      return;
+    }
+    if (key && key.name === 'backspace') {
+      buf = buf.slice(0, -1);
+      drawFooter();
+      return;
+    }
+    if (str && !key.ctrl && !key.meta) {
+      buf += str;
+      drawFooter();
+    }
+  };
+
+  const onResize = () => {
+    if (!engaged) return;
+    // A physical resize resets most terminals' scroll region back to
+    // full-screen, so both the region and the box's own row numbers need
+    // recomputing from the new size before the footer redraws at its new
+    // bottom-row position.
+    applyRegion();
+    drawFooter();
+  };
+
+  const dock = {
+    // Switches to the alternate screen buffer and starts capturing input
+    // for the rest of the process's life — call once, before printing the
+    // welcome panel/intro (which then render into this fresh, blank
+    // buffer instead of the shell's normal scrollback).
     start() {
       if (!process.stdout.isTTY) return;
       active = true;
-      applyRegion();
-      // A scroll region is terminal-wide state that outlives this process
-      // if left set — whatever runs in the shell next would inherit a
-      // window with its bottom rows walled off. This is a last-resort net
-      // for exits that skip stop() (an uncaught error, a raw process.exit
-      // elsewhere in the app); resetScrollRegion() is harmless to call
-      // even when nothing is actually confined.
+      process.stdout.write(ENTER_ALT_SCREEN);
+      wasRaw = process.stdin.isRaw;
+      readline.emitKeypressEvents(process.stdin);
+      if (process.stdin.setRawMode) process.stdin.setRawMode(true);
+      process.stdin.resume();
+      process.stdin.on('keypress', onKeypress);
+      process.stdout.on('resize', onResize);
+      // The alternate screen and raw mode are terminal/process state that
+      // outlives this process if left set on an abrupt exit (an uncaught
+      // error, a raw process.exit elsewhere) — this is a last-resort net;
+      // leaveScreen() is harmless to call even when nothing is active.
       if (!exitHookInstalled) {
         exitHookInstalled = true;
-        process.once('exit', () => resetScrollRegion());
+        process.once('exit', () => { if (active) leaveScreen(); });
       }
+    },
+    // Call once the welcome panel + intro have been printed fresh into the
+    // blank alternate screen start() just switched to — computes the
+    // scroll region from the current terminal size, remembers `nextRow`
+    // (the row right after everything already printed) as where the very
+    // first turn's content should begin, and draws the initial footer.
+    engage({ nextRow: startRow = 1, statusText: st = '', knownCommands = [] } = {}) {
+      if (!active) return;
+      engaged = true;
+      nextRow = startRow;
+      statusText = st;
+      known = new Set(knownCommands.map((k) => k.toLowerCase()));
+      applyRegion();
+      drawFooter();
     },
     stop() {
       if (!active) return;
       active = false;
-      resetScrollRegion();
-    },
-    resize() {
-      if (!active) return;
-      applyRegion();
+      engaged = false;
+      process.stdin.removeListener('keypress', onKeypress);
+      process.stdout.removeListener('resize', onResize);
+      leaveScreen();
     },
     // Wipes rows [row, regionBottom] — i.e. everything in the scrolling
     // region from `row` down to its own bottom edge — without touching
-    // anything in the reserved footer rows below it. Used to clear a
+    // the reserved footer rows below it, and resets nextRow to `row` so
+    // whatever prints next lands starting exactly there. Used to clear a
     // specific onboarding block (the "Type your message..." hint) once
-    // real chatting starts, while the box itself and whatever was printed
-    // above `row` (the welcome panel) are left completely alone.
+    // real chatting starts, so the first turn's echo appears immediately
+    // under the welcome panel instead of down at the region's bottom edge.
     clearFrom(row) {
-      if (!active) return;
+      if (!engaged) return;
       for (let r = row; r <= regionBottom; r++) {
         moveTo(r, 1);
         readline.clearLine(process.stdout, 0);
       }
-      moveTo(regionBottom, 1);
+      nextRow = row;
     },
-    // Prints a (possibly multi-line) block into the scrolling region above
-    // the dock, each line ending in its own newline so DECSTBM scrolls the
-    // region exactly like a normal terminal would scroll a full screen.
+    // Prints a (possibly multi-line) block into the scrolling region.
+    // Content grows downward line by line from `nextRow` while there's
+    // still room — matching how the panel/intro above it were printed, so
+    // the first turn continues directly underneath with no gap — and only
+    // starts scrolling (each line ending in its own newline, so DECSTBM
+    // pushes the region up exactly like a normal terminal scrolling a full
+    // screen) once it actually reaches the region's bottom edge.
     print(text = '') {
-      if (!active) { console.log(text); return; }
-      moveTo(regionBottom, 1);
+      if (!engaged) { console.log(text); return; }
       String(text).split('\n').forEach((line) => {
+        const row = Math.min(nextRow, regionBottom);
+        moveTo(row, 1);
         readline.clearLine(process.stdout, 0);
-        process.stdout.write(line + '\n');
+        process.stdout.write(line);
+        if (row >= regionBottom) process.stdout.write('\n');
+        nextRow = row + 1;
       });
     },
-    // Draws the box — rule, typed text, rule, status line — in the
-    // reserved footer rows and resolves with whatever was typed once
-    // Enter is pressed. Unlike the old per-turn box this replaces, the box
-    // is never torn down on submit: it resets to its empty/placeholder
-    // state and stays put, ready for the next turn, while the submitted
-    // text and the reply print into the scrolling region above via
-    // print() — same "always there" input field a normal chat UI has.
-    input({ statusText, knownCommands = [] } = {}) {
+    // Resolves the next time Enter is pressed while no other turn is
+    // pending. Whatever's already in the box (typed while the previous
+    // reply was still streaming in — see the onKeypress note above) is
+    // exactly what a person sees and can keep editing; nothing is cleared
+    // out from under them just because a new turn opened up.
+    nextMessage() {
       return new Promise((resolve) => {
-        const placeholder = 'Try "/commands" to see what you can do';
-        const known = new Set(knownCommands.map((k) => k.toLowerCase()));
-        let buf = '';
-
-        const highlightedBuf = () => {
-          const match = buf.match(/^(\/\S*)([\s\S]*)$/);
-          if (match && known.has(match[1].slice(1).toLowerCase())) {
-            return c(match[1], 'blue') + match[2];
-          }
-          return buf;
-        };
-
-        const drawFooter = () => {
-          const w = terminalWidth();
-          const rule = divider(w);
-          const shown = buf ? highlightedBuf() : c(placeholder, 'dim');
-          const label = statusText || '';
-          const statusPad = ' '.repeat(Math.max(0, w - label.length));
-          const lines = [rule, c('› ', 'steelBlue') + shown, rule, statusPad + c(label, 'dim')];
-          const top = regionBottom + 1;
-          lines.forEach((line, i) => {
-            moveTo(top + i, 1);
-            readline.clearLine(process.stdout, 0);
-            process.stdout.write(line);
-          });
-          moveTo(top + 1, 3 + buf.length);
-        };
-
-        const stdin = process.stdin;
-        const wasRaw = stdin.isRaw;
-        readline.emitKeypressEvents(stdin);
-        if (stdin.setRawMode) stdin.setRawMode(true);
-        stdin.resume();
-
-        const cleanup = () => {
-          stdin.removeListener('keypress', onKeypress);
-          process.stdout.removeListener('resize', onResize);
-          if (stdin.setRawMode) stdin.setRawMode(wasRaw ?? false);
-        };
-
-        const onKeypress = (str, key) => {
-          if (key && key.ctrl && key.name === 'c') {
-            cleanup();
-            resetScrollRegion();
-            process.stdout.write('\n');
-            process.exit(0);
-            return;
-          }
-          if (key && (key.name === 'return' || key.name === 'enter')) {
-            cleanup();
-            const submitted = buf;
-            buf = '';
-            drawFooter();
-            resolve(submitted);
-            return;
-          }
-          if (key && key.name === 'backspace') {
-            buf = buf.slice(0, -1);
-            drawFooter();
-            return;
-          }
-          if (str && !key.ctrl && !key.meta) {
-            buf += str;
-            drawFooter();
-          }
-        };
-
-        // A physical window resize resets the terminal's scroll region to
-        // full-screen on most emulators, so both the region and the box's
-        // row numbers need recomputing from the new size — applyRegion()
-        // (via the dock's own resize()) reissues the DECSTBM for the new
-        // dimensions, then the box redraws at its new bottom-row position.
-        const onResize = () => {
-          applyRegion();
-          drawFooter();
-        };
-
-        drawFooter();
-        stdin.on('keypress', onKeypress);
-        process.stdout.on('resize', onResize);
+        pendingResolve = resolve;
       });
     },
   };
+  return dock;
 }
 
 // Waits for a single keypress (any key counts as "continue") without

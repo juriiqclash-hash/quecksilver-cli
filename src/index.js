@@ -716,17 +716,27 @@ async function oneOffForcedTool(forceTool, token, { files = [], output, json, op
   }
 }
 
-async function interactiveChat(token, { files = [], open, initialHistory = [], usedLines = 0 } = {}) {
-  // The welcome panel (mascot, model/plan/version/dir, quick tips) above
-  // this point is permanent — it's never cleared or redrawn again, it just
-  // scrolls off naturally as the conversation grows, same as any other
-  // line of chat history. Only the short "Type your message..."/"This is
-  // QueckSilver CLI" onboarding blurb printed below it is meant to go away
-  // once real chatting starts; `introStartRow` is exactly the terminal row
-  // that blurb begins on (`usedLines` is how many rows the panel already
-  // used since the session's one clearScreen()), so it can be wiped on its
-  // own via dock.clearFrom() below without touching the panel above it.
-  const introStartRow = usedLines + 1;
+async function interactiveChat(token, { files = [], open, initialHistory = [], account = null } = {}) {
+  const dock = createChatDock();
+  const out = (s = '') => dock.print(s);
+
+  // The dock switches to the alternate screen buffer here, before anything
+  // else is printed — see createChatDock()'s own comment for why: it's
+  // what keeps the input box's row numbers exempt from the terminal's own
+  // scrollback, so scrolling the conversation never drags the box along
+  // with it. The welcome panel/intro below render fresh into that blank
+  // buffer, not onto whatever was already on the normal screen.
+  dock.start();
+
+  const panelLines = account ? printWelcomePanel(account) : 0;
+  // The panel is permanent from here on — it's never cleared or redrawn
+  // again, it just scrolls off naturally as the conversation grows, same
+  // as any other line of chat history. Only the short "Type your
+  // message..."/"This is QueckSilver CLI" blurb printed right after it is
+  // meant to go away once real chatting starts; `introStartRow` is exactly
+  // the row that blurb begins on, so dock.clearFrom() below can wipe just
+  // that block without touching the panel above it.
+  const introStartRow = panelLines + 1;
   let headerActive = true;
   const printIntro = () => {
     console.log(c('Type your message and press Enter to chat. Type "exit" to quit, or /commands to see everything else you can do.', 'gray'));
@@ -746,19 +756,12 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], u
 
   const STATUS_TEXT = 'QueckSilver CLI • Powered by Zora';
   const history = [...initialHistory];
-  printIntro();
+  const introLines = printIntro();
   let pendingFiles = files;
   let pendingOutput = null;
   let sessionOpen = open ?? getSetting('autoOpen');
 
   const stripQuotes = (s) => s.trim().replace(/^"(.*)"$/, '$1');
-
-  // Everything printed once the chat is running goes through the dock —
-  // it's the docked footer's scroll region above it, not "wherever the
-  // cursor happens to be" — so the input box (and the welcome panel above
-  // it) are never at risk of being overwritten by a stray plain console.log.
-  const dock = createChatDock();
-  const out = (s = '') => dock.print(s);
 
   // Shared tail for both the forced-tool and normal chat paths: print
   // sources/saved attachments, honor a queued /output path, record the turn
@@ -782,18 +785,17 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], u
   // of a narrower default width leaving it looking cut short.
   const chatWidth = terminalWidth({ min: 80, max: 200 });
 
-  dock.start();
+  dock.engage({ nextRow: panelLines + introLines + 1, statusText: STATUS_TEXT, knownCommands: KNOWN_SLASH_COMMANDS });
 
   while (true) {
-    const line = await dock.input({ statusText: STATUS_TEXT, knownCommands: KNOWN_SLASH_COMMANDS });
+    const line = await dock.nextMessage();
     const text = line.trim();
     if (!text) continue;
     if (headerActive) {
       // Only the "type your message"/"This is QueckSilver CLI" blurb goes
       // away here — the welcome panel above `introStartRow` is untouched,
-      // and the input box itself (already reset to its empty/placeholder
-      // state by dock.input() above) is outside the cleared range entirely,
-      // so it never disappears or flickers even for this first turn.
+      // and the fixed input box itself is outside the cleared range
+      // entirely, so it never disappears or flickers even for this first turn.
       headerActive = false;
       dock.clearFrom(introStartRow);
     }
@@ -895,22 +897,29 @@ async function interactiveChat(token, { files = [], open, initialHistory = [], u
     }
   }
 
-  out('\nSee you soon!');
+  // Printed after leaving the alternate screen, not into it — anything
+  // written there right before stop() would vanish the instant the switch
+  // back to the normal screen happens, along with the rest of the buffer.
   dock.stop();
+  console.log('\nSee you soon!');
   process.exit(0);
 }
 
 // Shared "start a session" step: shows the account panel, then drops into
 // either a forced-tool call, a one-off answer, or the interactive chat loop.
+//
+// The welcome panel is only printed here (on the normal screen) for the
+// one-shot paths (forced-tool / one-off prompt) — interactiveChat switches
+// to the alternate screen buffer for its fixed-bottom input dock, which
+// starts out blank, so it prints its own copy of the panel fresh into that
+// buffer instead of inheriting one drawn on a screen it's about to leave.
 async function startSession(token, options) {
-  let usedLines = 0;
   let account = null;
   if (!options.json) {
     [account] = await Promise.all([
       fetchAccountInfo(token),
       getSetting('checkUpdates') ? checkForUpdate() : Promise.resolve(),
     ]);
-    usedLines = printWelcomePanel(account);
   }
 
   let files = [];
@@ -927,21 +936,12 @@ async function startSession(token, options) {
   }
 
   if (options.forceTool) {
+    if (account) printWelcomePanel(account);
     await oneOffForcedTool(options.forceTool, token, { files, output: options.output, json: options.json, open: options.open });
     return;
   }
 
   const continuedHistory = options.continueSession ? loadLastSession() : [];
-  if (options.continueSession && !options.json) {
-    console.log(c(
-      continuedHistory.length > 0
-        ? `Resumed previous session (${continuedHistory.length / 2} turn(s)).`
-        : 'No previous session found — starting fresh.',
-      'gray',
-    ));
-    console.log();
-    usedLines += 2;
-  }
 
   let prompt = (options.promptArgs || []).join(' ').trim();
   if (!prompt && files.length > 0) {
@@ -949,11 +949,21 @@ async function startSession(token, options) {
   }
 
   if (prompt) {
+    if (account) printWelcomePanel(account);
+    if (options.continueSession && !options.json) {
+      console.log(c(
+        continuedHistory.length > 0
+          ? `Resumed previous session (${continuedHistory.length / 2} turn(s)).`
+          : 'No previous session found — starting fresh.',
+        'gray',
+      ));
+      console.log();
+    }
     await oneOff(prompt, token, {
       files, output: options.output, json: options.json, open: options.open, history: continuedHistory,
     });
   } else {
-    await interactiveChat(token, { files, open: options.open, initialHistory: continuedHistory, usedLines });
+    await interactiveChat(token, { files, open: options.open, initialHistory: continuedHistory, account });
   }
 }
 
