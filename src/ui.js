@@ -189,17 +189,15 @@ export function detectTerminalWidth({ timeoutMs = 150 } = {}) {
 // goes absurdly narrow (piped/unknown width) or absurdly wide (huge
 // monitor) — used to size every full-width screen the same way.
 export function terminalWidth({ min = 60, max = 120, fallback = 80 } = {}) {
-  // verifiedColumns (from detectTerminalWidth's CSI 18t query, answered
-  // directly by the terminal) is trusted exactly as reported — no reason to
-  // shave a column off a number the terminal itself just confirmed. The
-  // -1 margin only applies to the process.stdout.columns fallback, which
-  // is the OS's own report and was observed to sometimes overstate the
-  // terminal's real width by one column (seen as the welcome panel's right
-  // border and the footer's status text both getting clipped a character
-  // short on some terminals) — that's exactly the gap detectTerminalWidth
-  // exists to close, so once it succeeds, trust it fully instead of still
-  // padding around it "just in case".
-  const cols = verifiedColumns ?? Math.max(1, (process.stdout.columns || fallback) - 1);
+  // Reserve the terminal's own last column rather than reporting the full
+  // width, even once verifiedColumns (the CSI 18t query) has answered:
+  // on at least one real setup (Windows Terminal/PowerShell) that query
+  // itself still reports one column more than the terminal can actually
+  // paint a full-width row into, so trusting it completely re-clips the
+  // exact same character short — e.g. "Powered by Zora" losing its last
+  // "a" — that this margin exists to prevent. So it always applies,
+  // regardless of where the column count came from.
+  const cols = Math.max(1, (verifiedColumns ?? process.stdout.columns ?? fallback) - 1);
   // The returned width must never exceed the terminal's *real* current
   // column count, even when that's narrower than `min` — every box/rule
   // this powers assumes one logical line = one physical terminal row, and
