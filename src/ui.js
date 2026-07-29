@@ -189,15 +189,7 @@ export function detectTerminalWidth({ timeoutMs = 150 } = {}) {
 // goes absurdly narrow (piped/unknown width) or absurdly wide (huge
 // monitor) — used to size every full-width screen the same way.
 export function terminalWidth({ min = 60, max = 120, fallback = 80 } = {}) {
-  // Reserve the terminal's own last column rather than reporting the full
-  // width, even once verifiedColumns (the CSI 18t query) has answered:
-  // on at least one real setup (Windows Terminal/PowerShell) that query
-  // itself still reports one column more than the terminal can actually
-  // paint a full-width row into, so trusting it completely re-clips the
-  // exact same character short — e.g. "Powered by Zora" losing its last
-  // "a" — that this margin exists to prevent. So it always applies,
-  // regardless of where the column count came from.
-  const cols = Math.max(1, (verifiedColumns ?? process.stdout.columns ?? fallback) - 1);
+  const cols = verifiedColumns ?? process.stdout.columns ?? fallback;
   // The returned width must never exceed the terminal's *real* current
   // column count, even when that's narrower than `min` — every box/rule
   // this powers assumes one logical line = one physical terminal row, and
@@ -834,6 +826,17 @@ export function enableSlashCommandHighlight(rl, promptColored, knownCommands) {
 const FOOTER_ROWS = 4;
 const ENTER_ALT_SCREEN = `${ESC}?1049h`;
 const LEAVE_ALT_SCREEN = `${ESC}?1049l`;
+// Writing a character into the terminal's last column and then immediately
+// repositioning the cursor (as every footer redraw below does, row by row)
+// hits a real auto-wrap edge case on some terminals: that last character
+// gets dropped instead of drawn, because the terminal was mid-transition
+// into its "pending wrap" state when the reposition arrived. Turning
+// auto-wrap off for the dock's entire lifetime (DECAWM, standard VT100)
+// sidesteps that transition entirely — a character written to the last
+// column just sits there instead of arming a wrap — so redraws can safely
+// use the terminal's full, real width with nothing held back.
+const DISABLE_AUTOWRAP = `${ESC}?7l`;
+const ENABLE_AUTOWRAP = `${ESC}?7h`;
 
 // Returns the cursor-position escape rather than writing it directly —
 // every redraw below builds one big string out of these and writes it in
@@ -959,7 +962,7 @@ export function createChatDock() {
   };
 
   const leaveScreen = () => {
-    process.stdout.write(LEAVE_ALT_SCREEN);
+    process.stdout.write(ENABLE_AUTOWRAP + LEAVE_ALT_SCREEN);
     if (process.stdin.setRawMode) process.stdin.setRawMode(wasRaw ?? false);
   };
 
@@ -1018,7 +1021,7 @@ export function createChatDock() {
     start() {
       if (!process.stdout.isTTY) return;
       active = true;
-      process.stdout.write(ENTER_ALT_SCREEN);
+      process.stdout.write(ENTER_ALT_SCREEN + DISABLE_AUTOWRAP);
       setTerminalTitle('QueckSilver CLI');
       wasRaw = process.stdin.isRaw;
       readline.emitKeypressEvents(process.stdin);
