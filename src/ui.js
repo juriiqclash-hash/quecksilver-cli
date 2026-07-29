@@ -189,7 +189,12 @@ export function detectTerminalWidth({ timeoutMs = 150 } = {}) {
 // goes absurdly narrow (piped/unknown width) or absurdly wide (huge
 // monitor) — used to size every full-width screen the same way.
 export function terminalWidth({ min = 60, max = 120, fallback = 80 } = {}) {
-  const cols = verifiedColumns ?? process.stdout.columns ?? fallback;
+  // Never use the terminal's exact last column — writing all the way out to
+  // it and then repositioning the cursor (every footer redraw does this)
+  // drops that last character on some terminals (confirmed: disabling
+  // auto-wrap didn't fix it either, so it's simplest to just not go there).
+  // One held-back column is the standard, boring fix every terminal UI uses.
+  const cols = Math.max(1, (verifiedColumns ?? process.stdout.columns ?? fallback) - 1);
   // The returned width must never exceed the terminal's *real* current
   // column count, even when that's narrower than `min` — every box/rule
   // this powers assumes one logical line = one physical terminal row, and
