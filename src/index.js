@@ -222,7 +222,7 @@ function printWelcomePanel({ email, isPro }, { log = console.log, clear = true }
     ...centerBlock(mascot().split('\n'), leftContentWidth),
     '',
     ...centerBlock([
-      statRow('Model', c('Zora 6.1', 'steelBlue')),
+      statRow('Model', c('Zora 6.5', 'steelBlue')),
       statRow('Plan', c(plan, 'steelBlue')),
       statRow('Version', `v${VERSION}`),
       statRow('Email', email),
