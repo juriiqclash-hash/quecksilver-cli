@@ -16,8 +16,8 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'));
 
-const SUPABASE_URL = 'https://pwdncixmwxedfhtiwpmt.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB3ZG5jaXhtd3hlZGZodGl3cG10Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUyNjE1NTIsImV4cCI6MjA5MDgzNzU1Mn0.z4qrH2YuBkVv9CbAOFNdbXD0wwAF8y-zCR584un_y9o';
+const SUPABASE_URL = 'https://kvqknrfemzszdtswyafj.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt2cWtucmZlbXpzemR0c3d5YWZqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTIyMDE3OTgsImV4cCI6MjEwNzc3Nzc5OH0.7srm22ARf_mdsdeyJGCGJpIMxMAoqIyVaYL6Zx10e9I';
 const ENDPOINT = `${SUPABASE_URL}/functions/v1/cli-chat`;
 const VERSION = pkg.version;
 
